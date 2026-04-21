@@ -20,7 +20,16 @@ import {
   signOut,
   type User,
 } from "firebase/auth";
-import { auth, googleProvider } from "./firebase/config";
+import {
+  collection,
+  addDoc,
+  getDocs,
+  query,
+  where,
+  deleteDoc,
+  doc,
+} from "firebase/firestore";
+import { auth, googleProvider, db } from "./firebase/config";
 
 type RawTradeRow = {
   name?: string;
@@ -33,6 +42,13 @@ type RawTradeRow = {
   points?: string | number;
   profit?: string | number;
   created_on?: string;
+  account?: string;
+  orderId?: string;
+  movTime?: string;
+  movType?: string;
+  qty?: string | number;
+  price?: string | number;
+  createdOn?: string;
 };
 
 type Trade = {
@@ -63,8 +79,8 @@ type AccountConfig = {
 };
 
 const COLORS = ["#22c55e", "#ef4444"];
+
 const STORAGE_KEYS = {
-  trades: "qboard_trades",
   fileName: "qboard_file_name",
   selectedAccount: "qboard_selected_account",
   search: "qboard_search",
@@ -100,14 +116,18 @@ const ACCOUNT_RULES: Record<string, AccountConfig> = {
 function detectAccountConfig(account: string): AccountConfig {
   if (account.startsWith("PA-")) return ACCOUNT_RULES.PA;
 
-  if (account.includes("-303") || account.includes("-304") || account.includes("-305")) {
+  if (
+    account.includes("-303") ||
+    account.includes("-304") ||
+    account.includes("-305")
+  ) {
     return ACCOUNT_RULES.APEX150;
   }
 
   if (
+    account.includes("-300") ||
     account.includes("-301") ||
-    account.includes("-302") ||
-    account.includes("-300")
+    account.includes("-302")
   ) {
     return ACCOUNT_RULES.APEX50;
   }
@@ -135,20 +155,46 @@ function parseMoney(value: unknown): number {
   if (typeof value === "number") return value;
   if (typeof value !== "string") return NaN;
 
-  const cleaned = value.trim().replace(/\$/g, "").replace(/\s/g, "").replace(/,/g, "");
+  const cleaned = value
+    .trim()
+    .replace(/\$/g, "")
+    .replace(/\s/g, "")
+    .replace(/,/g, "");
+
   if (!cleaned) return NaN;
   return Number(cleaned);
 }
 
+function parseValue(value: unknown): number {
+  if (value === null || value === undefined || value === "") return 0;
+  if (typeof value === "number") return value;
+
+  const text = String(value).trim();
+
+  const commaDecimal = /^-?\d+,\d+$/.test(text);
+  const normalized = commaDecimal
+    ? text.replace(/\./g, "").replace(",", ".")
+    : text.replace(/,/g, "");
+
+  const parsed = Number(normalized);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
 function getDayLabel(row: RawTradeRow): string {
-  if (row.created_on) {
-    const d = new Date(row.created_on);
-    if (!Number.isNaN(d.getTime())) return d.toLocaleDateString("pt-BR");
+  const createdOn = row.created_on || row.createdOn;
+  if (createdOn) {
+    const d = new Date(createdOn);
+    if (!Number.isNaN(d.getTime())) {
+      return d.toLocaleDateString("pt-BR");
+    }
   }
 
-  if (row.mov_time) {
-    const d = new Date(row.mov_time);
-    if (!Number.isNaN(d.getTime())) return d.toLocaleDateString("pt-BR");
+  const movTime = row.mov_time || row.movTime;
+  if (movTime) {
+    const d = new Date(movTime);
+    if (!Number.isNaN(d.getTime())) {
+      return d.toLocaleDateString("pt-BR");
+    }
   }
 
   return "Sem data";
@@ -160,20 +206,23 @@ function buildTrades(rows: RawTradeRow[]): Trade[] {
       const profit = parseMoney(row.profit);
 
       return {
-        account: row.name?.trim() || "Sem conta",
-        orderId: row.order_id?.trim() || "",
+        account: row.name?.trim() || row.account?.trim() || "Sem conta",
+        orderId: row.order_id?.trim() || row.orderId?.trim() || "",
         symbol: row.symbol?.trim() || "",
-        movTime: row.mov_time?.trim() || "",
-        movType: String(row.mov_type ?? ""),
-        qty: Number(row.exec_qty ?? 0),
-        price: Number(row.price_done ?? 0),
-        points: Number(row.points ?? 0),
+        movTime: row.mov_time?.trim() || row.movTime?.trim() || "",
+        movType: String(row.mov_type ?? row.movType ?? ""),
+        qty: Number(row.exec_qty ?? row.qty ?? 0),
+        price: parseValue(row.price_done ?? row.price ?? 0),
+        points: parseValue(row.points ?? 0),
         profit,
-        createdOn: row.created_on?.trim() || "",
+        createdOn: row.created_on?.trim() || row.createdOn?.trim() || "",
         day: getDayLabel(row),
       };
     })
-    .filter((trade) => !Number.isNaN(trade.profit));
+    .filter(
+      (trade) =>
+        !Number.isNaN(trade.profit) && (trade.account || trade.symbol || trade.orderId)
+    );
 }
 
 function mapFirebaseUser(user: User): UserData {
@@ -215,13 +264,19 @@ function LoginScreen({
     <div style={styles.loginWrap}>
       <div style={styles.loginPanel}>
         <div style={styles.brandBadge}>QBoard</div>
-        <h1 style={styles.loginTitle}>Painel profissional para contas proprietárias</h1>
+        <h1 style={styles.loginTitle}>
+          Painel profissional para contas proprietárias
+        </h1>
         <p style={styles.loginText}>
           Faça login com sua conta Google para acessar o dashboard, importar
           planilhas e acompanhar a performance das suas contas.
         </p>
 
-        <button style={styles.googleButton} onClick={onGoogleLogin} disabled={loading}>
+        <button
+          style={styles.googleButton}
+          onClick={onGoogleLogin}
+          disabled={loading}
+        >
           {loading ? "Entrando..." : "Entrar com Google"}
         </button>
       </div>
@@ -246,32 +301,22 @@ function DashboardScreen({
     function handleResize() {
       setScreenWidth(window.innerWidth);
     }
+
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
   useEffect(() => {
-    const savedTrades = localStorage.getItem(STORAGE_KEYS.trades);
     const savedFileName = localStorage.getItem(STORAGE_KEYS.fileName);
-    const savedSelectedAccount = localStorage.getItem(STORAGE_KEYS.selectedAccount);
+    const savedSelectedAccount = localStorage.getItem(
+      STORAGE_KEYS.selectedAccount
+    );
     const savedSearch = localStorage.getItem(STORAGE_KEYS.search);
-
-    if (savedTrades) {
-      try {
-        setTrades(JSON.parse(savedTrades));
-      } catch {
-        localStorage.removeItem(STORAGE_KEYS.trades);
-      }
-    }
 
     if (savedFileName) setFileName(savedFileName);
     if (savedSelectedAccount) setSelectedAccount(savedSelectedAccount);
     if (savedSearch) setSearch(savedSearch);
   }, []);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.trades, JSON.stringify(trades));
-  }, [trades]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.fileName, fileName);
@@ -284,6 +329,85 @@ function DashboardScreen({
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.search, search);
   }, [search]);
+
+  async function deleteUserTrades() {
+    if (!user?.email) return;
+
+    const q = query(
+      collection(db, "trades"),
+      where("userEmail", "==", user.email)
+    );
+
+    const snapshot = await getDocs(q);
+
+    for (const item of snapshot.docs) {
+      await deleteDoc(doc(db, "trades", item.id));
+    }
+  }
+
+  async function saveTradesToFirestore(importedTrades: Trade[]) {
+    if (!user?.email) return;
+
+    try {
+      for (const trade of importedTrades) {
+        await addDoc(collection(db, "trades"), {
+          userEmail: user.email,
+          account: trade.account,
+          orderId: trade.orderId,
+          symbol: trade.symbol,
+          movTime: trade.movTime,
+          movType: trade.movType,
+          qty: trade.qty,
+          price: trade.price,
+          points: trade.points,
+          profit: trade.profit,
+          createdOn: trade.createdOn,
+          day: trade.day,
+        });
+      }
+    } catch (error) {
+      console.error("Erro ao salvar trades no Firestore:", error);
+    }
+  }
+
+  async function loadTradesFromFirestore() {
+    if (!user?.email) return;
+
+    try {
+      const q = query(
+        collection(db, "trades"),
+        where("userEmail", "==", user.email)
+      );
+
+      const snapshot = await getDocs(q);
+
+      const loadedTrades: Trade[] = snapshot.docs.map((docItem) => {
+        const data = docItem.data();
+
+        return {
+          account: data.account || "",
+          orderId: data.orderId || "",
+          symbol: data.symbol || "",
+          movTime: data.movTime || "",
+          movType: data.movType || "",
+          qty: Number(data.qty || 0),
+          price: Number(data.price || 0),
+          points: Number(data.points || 0),
+          profit: Number(data.profit || 0),
+          createdOn: data.createdOn || "",
+          day: data.day || "",
+        };
+      });
+
+      setTrades(loadedTrades);
+    } catch (error) {
+      console.error("Erro ao carregar trades do Firestore:", error);
+    }
+  }
+
+  useEffect(() => {
+    loadTradesFromFirestore();
+  }, [user?.email]);
 
   const accounts = useMemo(() => {
     return Array.from(new Set(trades.map((trade) => trade.account))).sort();
@@ -384,15 +508,15 @@ function DashboardScreen({
           : Math.max(0, Math.min(100, (row.net / cfg.profitTarget) * 100));
 
       const riskPerDay =
-        cfg.typeLabel === "PA"
-          ? 0
-          : Math.max(0, drawdownAvailable * 0.05);
+        cfg.typeLabel === "PA" ? 0 : Math.max(0, drawdownAvailable * 0.05);
 
       let status = "Saudável";
       if (cfg.typeLabel !== "PA") {
         if (drawdownAvailable <= 0) status = "Falhou";
-        else if (drawdownAvailable < cfg.trailingDrawdown * 0.2) status = "Crítico";
-        else if (drawdownAvailable < cfg.trailingDrawdown * 0.4) status = "Atenção";
+        else if (drawdownAvailable < cfg.trailingDrawdown * 0.2)
+          status = "Crítico";
+        else if (drawdownAvailable < cfg.trailingDrawdown * 0.4)
+          status = "Atenção";
       }
 
       return {
@@ -486,8 +610,15 @@ function DashboardScreen({
     };
   }, [screenWidth]);
 
-  function handleParsedRows(rows: RawTradeRow[], importedFileName: string) {
+  async function handleParsedRows(
+    rows: RawTradeRow[],
+    importedFileName: string
+  ) {
     const parsedTrades = buildTrades(rows);
+
+    await deleteUserTrades();
+    await saveTradesToFirestore(parsedTrades);
+
     setTrades(parsedTrades);
     setFileName(importedFileName);
   }
@@ -496,8 +627,8 @@ function DashboardScreen({
     Papa.parse<RawTradeRow>(file, {
       header: true,
       skipEmptyLines: true,
-      complete: (results) => {
-        handleParsedRows(results.data || [], file.name);
+      complete: async (results) => {
+        await handleParsedRows(results.data || [], file.name);
       },
     });
   }
@@ -505,7 +636,7 @@ function DashboardScreen({
   function handleXlsxFile(file: File) {
     const reader = new FileReader();
 
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       const data = event.target?.result;
       if (!data) return;
 
@@ -514,7 +645,7 @@ function DashboardScreen({
       const sheet = workbook.Sheets[firstSheetName];
       const rows = XLSX.utils.sheet_to_json<RawTradeRow>(sheet, { defval: "" });
 
-      handleParsedRows(rows, file.name);
+      await handleParsedRows(rows, file.name);
     };
 
     reader.readAsArrayBuffer(file);
@@ -573,7 +704,6 @@ function DashboardScreen({
   }
 
   function clearLocalData() {
-    localStorage.removeItem(STORAGE_KEYS.trades);
     localStorage.removeItem(STORAGE_KEYS.fileName);
     localStorage.removeItem(STORAGE_KEYS.selectedAccount);
     localStorage.removeItem(STORAGE_KEYS.search);
@@ -593,7 +723,9 @@ function DashboardScreen({
         </div>
 
         <div style={styles.userBox}>
-          {user.photo ? <img src={user.photo} alt={user.name} style={styles.avatar} /> : null}
+          {user.photo ? (
+            <img src={user.photo} alt={user.name} style={styles.avatar} />
+          ) : null}
           <div>
             <div style={styles.userName}>{user.name}</div>
             <div style={styles.userEmail}>{user.email}</div>
@@ -657,7 +789,7 @@ function DashboardScreen({
       <main style={layout.main}>
         <div style={layout.headerRow}>
           <div>
-            <h1 style={styles.title}>QBoard - Painel Principal</h1>
+            <h1 style={styles.title}>QBoard Dashboard</h1>
             <p style={styles.subtitle}>
               Resumo profissional de performance, risco, metas e execução.
             </p>
@@ -708,7 +840,9 @@ function DashboardScreen({
               <MetricCard
                 title="Saldo atual"
                 value={formatCurrency(selectedRiskAccount.balanceCurrent)}
-                color={selectedRiskAccount.balanceCurrent >= 0 ? "#22c55e" : "#ef4444"}
+                color={
+                  selectedRiskAccount.balanceCurrent >= 0 ? "#22c55e" : "#ef4444"
+                }
               />
               <MetricCard
                 title="Drawdown disponível"
@@ -724,7 +858,9 @@ function DashboardScreen({
               <MetricCard
                 title="Distância da meta"
                 value={formatCurrency(selectedRiskAccount.distanceToTarget)}
-                color={selectedRiskAccount.distanceToTarget <= 0 ? "#22c55e" : "#93c5fd"}
+                color={
+                  selectedRiskAccount.distanceToTarget <= 0 ? "#22c55e" : "#93c5fd"
+                }
               />
               <MetricCard
                 title="Risco/dia sugerido"
@@ -744,7 +880,9 @@ function DashboardScreen({
               <div style={styles.progressWrap}>
                 <div style={styles.progressHeader}>
                   <span>Progresso até a meta</span>
-                  <span>{formatNumber(selectedRiskAccount.progressToTarget)}%</span>
+                  <span>
+                    {formatNumber(selectedRiskAccount.progressToTarget)}%
+                  </span>
                 </div>
                 <div style={styles.progressBarBg}>
                   <div
@@ -796,10 +934,14 @@ function DashboardScreen({
                     paddingAngle={4}
                   >
                     {pieData.map((entry, index) => (
-                      <Cell key={entry.name} fill={COLORS[index % COLORS.length]} />
+                      <Cell
+                        key={entry.name}
+                        fill={COLORS[index % COLORS.length]}
+                      />
                     ))}
                   </Pie>
                   <Tooltip
+                    formatter={(value) => Number(value ?? 0)}
                     contentStyle={{
                       backgroundColor: "#0f172a",
                       border: "1px solid #334155",
@@ -812,10 +954,16 @@ function DashboardScreen({
 
             <div style={styles.legendRow}>
               <span style={styles.legendItem}>
-                <span style={{ ...styles.legendDot, background: "#22c55e" }} /> Gains
+                <span
+                  style={{ ...styles.legendDot, background: "#22c55e" }}
+                />{" "}
+                Gains
               </span>
               <span style={styles.legendItem}>
-                <span style={{ ...styles.legendDot, background: "#ef4444" }} /> Losses
+                <span
+                  style={{ ...styles.legendDot, background: "#ef4444" }}
+                />{" "}
+                Losses
               </span>
             </div>
           </div>
@@ -841,11 +989,20 @@ function DashboardScreen({
                     <tr key={row.account}>
                       <td style={styles.td}>{row.account}</td>
                       <td style={styles.td}>{row.typeLabel}</td>
-                      <td style={{ ...styles.td, color: row.net >= 0 ? "#22c55e" : "#ef4444" }}>
+                      <td
+                        style={{
+                          ...styles.td,
+                          color: row.net >= 0 ? "#22c55e" : "#ef4444",
+                        }}
+                      >
                         {formatCurrency(row.net)}
                       </td>
-                      <td style={styles.td}>{formatCurrency(row.drawdownAvailable)}</td>
-                      <td style={styles.td}>{formatCurrency(row.distanceToTarget)}</td>
+                      <td style={styles.td}>
+                        {formatCurrency(row.drawdownAvailable)}
+                      </td>
+                      <td style={styles.td}>
+                        {formatCurrency(row.distanceToTarget)}
+                      </td>
                       <td
                         style={{
                           ...styles.td,
@@ -884,7 +1041,9 @@ function DashboardScreen({
                     .slice(-12)
                     .reverse()
                     .map((trade) => (
-                      <tr key={`${trade.orderId}-${trade.createdOn}-${trade.profit}`}>
+                      <tr
+                        key={`${trade.orderId}-${trade.createdOn}-${trade.profit}`}
+                      >
                         <td style={styles.td}>{trade.day}</td>
                         <td style={styles.td}>{trade.account}</td>
                         <td style={styles.td}>{trade.symbol}</td>
@@ -952,7 +1111,12 @@ export default function QBoard() {
   }
 
   if (!user) {
-    return <LoginScreen onGoogleLogin={handleGoogleLogin} loading={loginLoading} />;
+    return (
+      <LoginScreen
+        onGoogleLogin={handleGoogleLogin}
+        loading={loginLoading}
+      />
+    );
   }
 
   return <DashboardScreen onLogout={handleLogout} user={user} />;
@@ -1218,7 +1382,8 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    background: "linear-gradient(135deg, #020617 0%, #0f172a 50%, #111827 100%)",
+    background:
+      "linear-gradient(135deg, #020617 0%, #0f172a 50%, #111827 100%)",
     padding: 20,
     fontFamily: "Arial, sans-serif",
   },
