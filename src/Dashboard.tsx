@@ -18,6 +18,7 @@ import {
   onAuthStateChanged,
   signInWithPopup,
   signOut,
+  signInWithEmailAndPassword,
   type User,
 } from "firebase/auth";
 import {
@@ -27,6 +28,11 @@ import {
   query,
   where,
   Timestamp,
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  serverTimestamp,
 } from "firebase/firestore";
 import { auth, googleProvider, db } from "./firebase/config";
 
@@ -240,6 +246,46 @@ function mapFirebaseUser(user: User): UserData {
   };
 }
 
+async function ensureAppUser(firebaseUser: User) {
+  const email = firebaseUser.email;
+
+  if (!email) {
+    throw new Error("Usuário sem email.");
+  }
+
+  const userRef = doc(db, "app_users", email);
+  const userSnap = await getDoc(userRef);
+
+  if (!userSnap.exists()) {
+    await setDoc(userRef, {
+      email,
+      name: firebaseUser.displayName || "",
+      photo: firebaseUser.photoURL || "",
+      active: false,
+      createdAt: serverTimestamp(),
+      lastLoginAt: serverTimestamp(),
+    });
+
+    return {
+      exists: false,
+      active: false,
+    };
+  }
+
+  const data = userSnap.data();
+
+  await updateDoc(userRef, {
+    name: firebaseUser.displayName || data.name || "",
+    photo: firebaseUser.photoURL || data.photo || "",
+    lastLoginAt: serverTimestamp(),
+  });
+
+  return {
+    exists: true,
+    active: Boolean(data.active),
+  };
+}
+
 function MetricCard({
   title,
   value,
@@ -262,10 +308,20 @@ function MetricCard({
 
 function LoginScreen({
   onGoogleLogin,
+  onEmailLogin,
   loading,
+  emailLogin,
+  setEmailLogin,
+  passwordLogin,
+  setPasswordLogin,
 }: {
   onGoogleLogin: () => void;
+  onEmailLogin: () => void;
   loading: boolean;
+  emailLogin: string;
+  setEmailLogin: React.Dispatch<React.SetStateAction<string>>;
+  passwordLogin: string;
+  setPasswordLogin: React.Dispatch<React.SetStateAction<string>>;
 }) {
   return (
     <div style={styles.loginWrap}>
@@ -275,17 +331,62 @@ function LoginScreen({
           Painel profissional para contas mesas proprietárias
         </h1>
         <p style={styles.loginText}>
-          Faça login com sua conta Google para acessar o dashboard, importar
-          planilhas e acompanhar a performance das suas contas.
+          Faça login com sua conta Google ou com email e senha para acessar o
+          dashboard.
         </p>
+
+        <input
+          type="email"
+          placeholder="Digite seu email"
+          value={emailLogin}
+          onChange={(e) => setEmailLogin(e.target.value)}
+          style={styles.loginInput}
+        />
+
+        <input
+          type="password"
+          placeholder="Digite sua senha"
+          value={passwordLogin}
+          onChange={(e) => setPasswordLogin(e.target.value)}
+          style={styles.loginInput}
+        />
 
         <button
           style={styles.googleButton}
-          onClick={onGoogleLogin}
+          onClick={onEmailLogin}
           disabled={loading}
         >
-          {loading ? "Entrando..." : "Entrar com Google"}
+          {loading ? "Entrando..." : "Entrar com email"}
         </button>
+
+        <button
+  style={styles.googleLoginButton}
+  onClick={onGoogleLogin}
+  disabled={loading}
+>
+  <span style={styles.googleIconWrap}>
+    <svg width="18" height="18" viewBox="0 0 48 48">
+      <path
+        fill="#FFC107"
+        d="M43.611 20.083H42V20H24v8h11.303C33.655 32.657 29.195 36 24 36c-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.96 3.04l5.657-5.657C34.046 6.053 29.277 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z"
+      />
+      <path
+        fill="#FF3D00"
+        d="M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.96 3.04l5.657-5.657C34.046 6.053 29.277 4 24 4 16.318 4 9.656 8.337 6.306 14.691z"
+      />
+      <path
+        fill="#4CAF50"
+        d="M24 44c5.176 0 9.86-1.977 13.409-5.192l-6.19-5.238C29.143 35.091 26.715 36 24 36c-5.174 0-9.623-3.326-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z"
+      />
+      <path
+        fill="#1976D2"
+        d="M43.611 20.083H42V20H24v8h11.303c-.792 2.237-2.231 4.166-4.084 5.571l.003-.002 6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z"
+      />
+    </svg>
+  </span>
+
+  <span>{loading ? "Entrando..." : "Entrar com Google"}</span>
+</button>
       </div>
     </div>
   );
@@ -666,27 +767,27 @@ function DashboardScreen({
   }, [riskByAccount, selectedAccount]);
 
   const byDay = useMemo(() => {
-  const map = new Map<string, number>();
+    const map = new Map<string, number>();
 
-  filteredTrades.forEach((trade) => {
-    map.set(trade.day, (map.get(trade.day) || 0) + trade.profit);
-  });
+    filteredTrades.forEach((trade) => {
+      map.set(trade.day, (map.get(trade.day) || 0) + trade.profit);
+    });
 
-  const result = Array.from(map.entries()).map(([day, total]) => {
-    const [d, m, y] = day.split("/");
-    const dateObj = new Date(`${y}-${m}-${d}`);
+    const result = Array.from(map.entries()).map(([day, total]) => {
+      const [d, m, y] = day.split("/");
+      const dateObj = new Date(`${y}-${m}-${d}`);
 
-    return {
-      day,
-      total,
-      dateObj,
-    };
-  });
+      return {
+        day,
+        total,
+        dateObj,
+      };
+    });
 
-  return result
-    .sort((a, b) => a.dateObj.getTime() - b.dateObj.getTime()) // ORDEM CRESCENTE
-    .map(({ day, total }) => ({ day, total }));
-}, [filteredTrades]);
+    return result
+      .sort((a, b) => a.dateObj.getTime() - b.dateObj.getTime())
+      .map(({ day, total }) => ({ day, total }));
+  }, [filteredTrades]);
 
   const payoffByDay = useMemo(() => {
     const map = new Map<
@@ -838,7 +939,7 @@ function DashboardScreen({
     return {
       appShell: {
         ...styles.appShell,
-        gridTemplateColumns: isMobile ? "1fr" : "280px 1fr",
+        gridTemplateColumns: isMobile ? "1fr" : "480px 1fr",
       } as React.CSSProperties,
       gridCards: {
         ...styles.gridCards,
@@ -984,7 +1085,7 @@ function DashboardScreen({
       type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     });
 
-    saveAs(blob, "qboard-risco-metas.xlsx");
+    saveAs(blob, "qiboard-risco-metas.xlsx");
   }
 
   function clearLocalFilters() {
@@ -1090,19 +1191,18 @@ function DashboardScreen({
         <div style={styles.sideBox}>
           <div style={styles.sideBoxTitle}>Ações</div>
           <button style={styles.actionButton} onClick={loadTradesFromFirestore}>
-            Recarregar do banco
+            Pesquisar
           </button>
           <button style={styles.actionButton} onClick={exportSummaryExcel}>
             Exportar risco e metas
           </button>
           <button style={styles.clearButton} onClick={clearLocalFilters}>
-            Limpar filtros locais
+            Limpar 
           </button>
-        </div>
-
-        <button style={styles.secondaryButton} onClick={onLogout}>
+          <button style={styles.secondaryButton} onClick={onLogout}>
           Sair
         </button>
+        </div>
       </aside>
 
       <main style={layout.main}>
@@ -1110,7 +1210,7 @@ function DashboardScreen({
           <div>
             <h1 style={styles.title}>QiBoard - Painel Principal</h1>
             <p style={styles.subtitle}>
-              Resumo profissional de performance, risco, metas e execução.
+              Relatório profissional de performance, risco, metas e execução.
             </p>
             <p style={styles.subtitle}>
               {loadingData
@@ -1292,7 +1392,10 @@ function DashboardScreen({
                       backgroundColor: "#0f172a",
                       border: "1px solid #334155",
                       borderRadius: 12,
+                      color: "#ffffff",
                     }}
+                    labelStyle={{ color: "#93c5fd" }}
+                    itemStyle={{ color: "#ffffff" }}
                   />
                 </PieChart>
               </ResponsiveContainer>
@@ -1514,19 +1617,35 @@ function DashboardScreen({
   );
 }
 
-export default function QBoard() {
+export default function QiBoard() {
   const [user, setUser] = useState<UserData | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [loginLoading, setLoginLoading] = useState(false);
+  const [emailLogin, setEmailLogin] = useState("");
+  const [passwordLogin, setPasswordLogin] = useState("");
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
-      if (firebaseUser) {
-        setUser(mapFirebaseUser(firebaseUser));
-      } else {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      try {
+        if (firebaseUser) {
+          const appUser = await ensureAppUser(firebaseUser);
+
+          if (!appUser.active) {
+            setUser(null);
+            await signOut(auth);
+            alert("Seu acesso ainda não está ativo.");
+          } else {
+            setUser(mapFirebaseUser(firebaseUser));
+          }
+        } else {
+          setUser(null);
+        }
+      } catch (error) {
+        console.error("Erro ao validar usuário:", error);
         setUser(null);
+      } finally {
+        setAuthLoading(false);
       }
-      setAuthLoading(false);
     });
 
     return () => unsubscribe();
@@ -1535,10 +1654,50 @@ export default function QBoard() {
   async function handleGoogleLogin() {
     try {
       setLoginLoading(true);
-      await signInWithPopup(auth, googleProvider);
+
+      const result = await signInWithPopup(auth, googleProvider);
+      const firebaseUser = result.user;
+
+      const appUser = await ensureAppUser(firebaseUser);
+
+      if (!appUser.active) {
+        alert(
+          `O usuário ${firebaseUser.email} foi cadastrado, mas ainda está inativo.`
+        );
+        await signOut(auth);
+        return;
+      }
     } catch (error) {
       console.error("Erro ao fazer login com Google:", error);
       alert("Não foi possível entrar com Google.");
+    } finally {
+      setLoginLoading(false);
+    }
+  }
+
+  async function handleEmailLogin() {
+    try {
+      setLoginLoading(true);
+
+      const result = await signInWithEmailAndPassword(
+        auth,
+        emailLogin,
+        passwordLogin
+      );
+
+      const firebaseUser = result.user;
+      const appUser = await ensureAppUser(firebaseUser);
+
+      if (!appUser.active) {
+        alert(
+          `O usuário ${firebaseUser.email} está cadastrado, mas ainda está inativo.`
+        );
+        await signOut(auth);
+        return;
+      }
+    } catch (error) {
+      console.error("Erro ao fazer login com email e senha:", error);
+      alert("Não foi possível entrar com email e senha.");
     } finally {
       setLoginLoading(false);
     }
@@ -1560,7 +1719,12 @@ export default function QBoard() {
     return (
       <LoginScreen
         onGoogleLogin={handleGoogleLogin}
+        onEmailLogin={handleEmailLogin}
         loading={loginLoading}
+        emailLogin={emailLogin}
+        setEmailLogin={setEmailLogin}
+        passwordLogin={passwordLogin}
+        setPasswordLogin={setPasswordLogin}
       />
     );
   }
@@ -1839,7 +2003,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   loginPanel: {
     width: "100%",
-    maxWidth: 760,
+    maxWidth: 700,
     background: "rgba(15, 23, 42, 0.95)",
     border: "1px solid #223048",
     borderRadius: 24,
@@ -1860,13 +2024,23 @@ const styles: Record<string, React.CSSProperties> = {
   loginTitle: {
     margin: 0,
     color: "#f8fafc",
-    fontSize: 34,
-    lineHeight: 1.1,
+    fontSize: 28,
+    lineHeight: 1.2,
   },
   loginText: {
     margin: 0,
     color: "#94a3b8",
     lineHeight: 1.6,
+    fontSize: 16,
+  },
+  loginInput: {
+    padding: 14,
+    borderRadius: 14,
+    border: "1px solid #334155",
+    background: "#020617",
+    color: "#ffffff",
+    fontSize: 15,
+    outline: "none",
   },
   googleButton: {
     marginTop: 8,
@@ -1874,6 +2048,17 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 14,
     border: "none",
     background: "#2563eb",
+    color: "white",
+    fontWeight: 700,
+    cursor: "pointer",
+    fontSize: 15,
+  },
+  secondaryLoginButton: {
+    marginTop: 4,
+    padding: 14,
+    borderRadius: 14,
+    border: "1px solid #334155",
+    background: "transparent",
     color: "white",
     fontWeight: 700,
     cursor: "pointer",
@@ -1892,4 +2077,27 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 24,
     fontWeight: 700,
   },
+  googleLoginButton: {
+  marginTop: 4,
+  padding: 14,
+  borderRadius: 14,
+  border: "1px solid #334155",
+  background: "#ffffff",
+  color: "#111827",
+  fontWeight: 700,
+  cursor: "pointer",
+  fontSize: 15,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 10,
+},
+
+googleIconWrap: {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: 20,
+  height: 20,
+},
 };
