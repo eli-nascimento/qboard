@@ -26,6 +26,7 @@ import {
   getDocs,
   query,
   where,
+  Timestamp,
 } from "firebase/firestore";
 import { auth, googleProvider, db } from "./firebase/config";
 
@@ -84,6 +85,8 @@ const STORAGE_KEYS = {
   selectedAccount: "qboard_selected_account",
   search: "qboard_search",
   selectedFile: "qboard_selected_file",
+  startDate: "qboard_start_date",
+  endDate: "qboard_end_date",
 };
 
 const ACCOUNT_RULES: Record<string, AccountConfig> = {
@@ -101,7 +104,7 @@ const ACCOUNT_RULES: Record<string, AccountConfig> = {
   },
   APEX50: {
     balanceStart: 50000,
-    trailingDrawdown: 2500,
+    trailingDrawdown: 2000,
     profitTarget: 3000,
     typeLabel: "50k",
   },
@@ -299,6 +302,8 @@ function DashboardScreen({
   const [selectedAccount, setSelectedAccount] = useState("Todas");
   const [search, setSearch] = useState("");
   const [selectedFile, setSelectedFile] = useState("Todos");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
   const [lastImportedFileName, setLastImportedFileName] = useState("");
   const [screenWidth, setScreenWidth] = useState(window.innerWidth);
   const [loadingData, setLoadingData] = useState(false);
@@ -318,10 +323,14 @@ function DashboardScreen({
     );
     const savedSearch = localStorage.getItem(STORAGE_KEYS.search);
     const savedSelectedFile = localStorage.getItem(STORAGE_KEYS.selectedFile);
+    const savedStartDate = localStorage.getItem(STORAGE_KEYS.startDate);
+    const savedEndDate = localStorage.getItem(STORAGE_KEYS.endDate);
 
     if (savedSelectedAccount) setSelectedAccount(savedSelectedAccount);
     if (savedSearch) setSearch(savedSearch);
     if (savedSelectedFile) setSelectedFile(savedSelectedFile);
+    if (savedStartDate) setStartDate(savedStartDate);
+    if (savedEndDate) setEndDate(savedEndDate);
   }, []);
 
   useEffect(() => {
@@ -335,6 +344,14 @@ function DashboardScreen({
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.selectedFile, selectedFile);
   }, [selectedFile]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.startDate, startDate);
+  }, [startDate]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.endDate, endDate);
+  }, [endDate]);
 
   async function saveTradesToFirestore(importedTrades: Trade[]) {
     if (!user?.email) return;
@@ -393,58 +410,58 @@ function DashboardScreen({
     }
   }
 
- async function loadTradesFromFirestore() {
-  if (!user?.email) return;
+  async function loadTradesFromFirestore() {
+    if (!user?.email) return;
 
-  try {
-    setLoadingData(true);
+    try {
+      setLoadingData(true);
 
-    const q = query(
-      collection(db, "trades"),
-      where("userEmail", "==", user.email)
-    );
+      const q = query(
+        collection(db, "trades"),
+        where("userEmail", "==", user.email)
+      );
 
-    const snapshot = await getDocs(q);
+      const snapshot = await getDocs(q);
 
-    const loadedTrades: Trade[] = snapshot.docs.map((docItem) => {
-      const data = docItem.data();
+      const loadedTrades: Trade[] = snapshot.docs.map((docItem) => {
+        const data = docItem.data();
 
-      return {
-        account: data.account || "",
-        orderId: data.orderId || "",
-        symbol: data.symbol || "",
-        movTime: data.movTime || "",
-        movType: data.movType || "",
-        qty: Number(data.qty || 0),
-        price: Number(data.price || 0),
-        points: Number(data.points || 0),
-        profit: Number(data.profit || 0),
-        createdOn: data.createdOn || "",
-        day: data.day || "",
-        importedFileName: data.importedFileName || "",
-        importedAt:
-          data.importedAt?.toDate?.()?.toISOString?.() ||
-          data.importedAt ||
-          "",
-      };
-    });
+        return {
+          account: data.account || "",
+          orderId: data.orderId || "",
+          symbol: data.symbol || "",
+          movTime: data.movTime || "",
+          movType: data.movType || "",
+          qty: Number(data.qty || 0),
+          price: Number(data.price || 0),
+          points: Number(data.points || 0),
+          profit: Number(data.profit || 0),
+          createdOn: data.createdOn || "",
+          day: data.day || "",
+          importedFileName: data.importedFileName || "",
+          importedAt:
+            data.importedAt instanceof Timestamp
+              ? data.importedAt.toDate().toISOString()
+              : data.importedAt || "",
+        };
+      });
 
-    loadedTrades.sort((a, b) =>
-      String(b.importedAt || "").localeCompare(String(a.importedAt || ""))
-    );
+      loadedTrades.sort((a, b) =>
+        String(b.importedAt || "").localeCompare(String(a.importedAt || ""))
+      );
 
-    setTrades(loadedTrades);
+      setTrades(loadedTrades);
 
-    if (loadedTrades.length > 0) {
-      setLastImportedFileName(loadedTrades[0].importedFileName || "");
+      if (loadedTrades.length > 0) {
+        setLastImportedFileName(loadedTrades[0].importedFileName || "");
+      }
+    } catch (error) {
+      console.error("Erro ao carregar trades do Firestore:", error);
+      alert("Erro ao recarregar dados do banco.");
+    } finally {
+      setLoadingData(false);
     }
-  } catch (error) {
-    console.error("Erro ao carregar trades do Firestore:", error);
-    alert("Erro ao recarregar dados do banco.");
-  } finally {
-    setLoadingData(false);
   }
-}
 
   useEffect(() => {
     loadTradesFromFirestore();
@@ -463,6 +480,46 @@ function DashboardScreen({
   const accounts = useMemo(() => {
     return Array.from(new Set(trades.map((trade) => trade.account))).sort();
   }, [trades]);
+
+  function tradeMatchesDateRange(trade: Trade) {
+    if (!startDate && !endDate) return true;
+
+    let tradeDate: Date | null = null;
+
+    if (trade.createdOn) {
+      const d = new Date(trade.createdOn);
+      if (!Number.isNaN(d.getTime())) {
+        tradeDate = d;
+      }
+    }
+
+    if (!tradeDate && trade.movTime) {
+      const d = new Date(trade.movTime);
+      if (!Number.isNaN(d.getTime())) {
+        tradeDate = d;
+      }
+    }
+
+    if (!tradeDate) return false;
+
+    const tradeOnlyDate = new Date(
+      tradeDate.getFullYear(),
+      tradeDate.getMonth(),
+      tradeDate.getDate()
+    );
+
+    if (startDate) {
+      const start = new Date(`${startDate}T00:00:00`);
+      if (tradeOnlyDate < start) return false;
+    }
+
+    if (endDate) {
+      const end = new Date(`${endDate}T23:59:59`);
+      if (tradeOnlyDate > end) return false;
+    }
+
+    return true;
+  }
 
   const filteredTrades = useMemo(() => {
     return trades.filter((trade) => {
@@ -483,10 +540,11 @@ function DashboardScreen({
         .toLowerCase();
 
       const searchOk = text.includes(search.toLowerCase());
+      const dateOk = tradeMatchesDateRange(trade);
 
-      return accountOk && fileOk && searchOk;
+      return accountOk && fileOk && searchOk && dateOk;
     });
-  }, [trades, selectedAccount, selectedFile, search]);
+  }, [trades, selectedAccount, selectedFile, search, startDate, endDate]);
 
   const metrics = useMemo(() => {
     const positive = filteredTrades.filter((t) => t.profit > 0);
@@ -632,7 +690,7 @@ function DashboardScreen({
     return {
       appShell: {
         ...styles.appShell,
-        gridTemplateColumns: isMobile ? "1fr" : "280px 1fr",
+        gridTemplateColumns: isMobile ? "1fr" : "440px 1fr",
       } as React.CSSProperties,
       gridCards: {
         ...styles.gridCards,
@@ -768,10 +826,14 @@ function DashboardScreen({
     localStorage.removeItem(STORAGE_KEYS.selectedAccount);
     localStorage.removeItem(STORAGE_KEYS.search);
     localStorage.removeItem(STORAGE_KEYS.selectedFile);
+    localStorage.removeItem(STORAGE_KEYS.startDate);
+    localStorage.removeItem(STORAGE_KEYS.endDate);
 
     setSelectedAccount("Todas");
     setSearch("");
     setSelectedFile("Todos");
+    setStartDate("");
+    setEndDate("");
   }
 
   return (
@@ -842,6 +904,22 @@ function DashboardScreen({
             placeholder="Buscar conta, símbolo, data, arquivo..."
             style={styles.inputDark}
           />
+
+          <div style={styles.dateFilterRow}>
+            <input
+              type="date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              style={styles.inputDark}
+            />
+
+            <input
+              type="date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              style={styles.inputDark}
+            />
+          </div>
         </div>
 
         <div style={styles.sideBox}>
@@ -995,7 +1073,14 @@ function DashboardScreen({
                       borderRadius: 12,
                     }}
                   />
-                  <Bar dataKey="total" fill="#3b82f6" radius={[8, 8, 0, 0]} />
+                  <Bar dataKey="total" radius={[8, 8, 0, 0]}>
+                    {byDay.map((entry, index) => (
+                      <Cell
+                        key={`cell-${index}`}
+                        fill={entry.total >= 0 ? "#22c55e" : "#ef4444"} // verde | vermelho
+                      />
+                    ))}
+                  </Bar>
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -1305,6 +1390,11 @@ const styles: Record<string, React.CSSProperties> = {
     background: "#020617",
     color: "#e2e8f0",
     border: "1px solid #334155",
+  },
+  dateFilterRow: {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap: 12,
   },
   secondaryButton: {
     marginTop: "auto",
