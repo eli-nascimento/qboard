@@ -104,7 +104,7 @@ const ACCOUNT_RULES: Record<string, AccountConfig> = {
   },
   APEX50: {
     balanceStart: 50000,
-    trailingDrawdown: 2000,
+    trailingDrawdown: 2500,
     profitTarget: 3000,
     typeLabel: "50k",
   },
@@ -270,9 +270,9 @@ function LoginScreen({
   return (
     <div style={styles.loginWrap}>
       <div style={styles.loginPanel}>
-        <div style={styles.brandBadge}>QBoard</div>
+        <div style={styles.brandBadge}>QiBoard</div>
         <h1 style={styles.loginTitle}>
-          Painel profissional para contas proprietárias
+          Painel profissional para contas mesas proprietárias
         </h1>
         <p style={styles.loginText}>
           Faça login com sua conta Google para acessar o dashboard, importar
@@ -666,14 +666,162 @@ function DashboardScreen({
   }, [riskByAccount, selectedAccount]);
 
   const byDay = useMemo(() => {
-    const map = new Map<string, number>();
+  const map = new Map<string, number>();
+
+  filteredTrades.forEach((trade) => {
+    map.set(trade.day, (map.get(trade.day) || 0) + trade.profit);
+  });
+
+  const result = Array.from(map.entries()).map(([day, total]) => {
+    const [d, m, y] = day.split("/");
+    const dateObj = new Date(`${y}-${m}-${d}`);
+
+    return {
+      day,
+      total,
+      dateObj,
+    };
+  });
+
+  return result
+    .sort((a, b) => a.dateObj.getTime() - b.dateObj.getTime()) // ORDEM CRESCENTE
+    .map(({ day, total }) => ({ day, total }));
+}, [filteredTrades]);
+
+  const payoffByDay = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        day: string;
+        gains: number;
+        losses: number;
+        grossProfit: number;
+        grossLossAbs: number;
+        net: number;
+        avgGain: number;
+        avgLoss: number;
+        payoff: number | null;
+        payoffLabel: string;
+      }
+    >();
 
     filteredTrades.forEach((trade) => {
-      map.set(trade.day, (map.get(trade.day) || 0) + trade.profit);
+      const current = map.get(trade.day) || {
+        day: trade.day,
+        gains: 0,
+        losses: 0,
+        grossProfit: 0,
+        grossLossAbs: 0,
+        net: 0,
+        avgGain: 0,
+        avgLoss: 0,
+        payoff: null,
+        payoffLabel: "-",
+      };
+
+      current.net += trade.profit;
+
+      if (trade.profit > 0) {
+        current.gains += 1;
+        current.grossProfit += trade.profit;
+      }
+
+      if (trade.profit < 0) {
+        current.losses += 1;
+        current.grossLossAbs += Math.abs(trade.profit);
+      }
+
+      map.set(trade.day, current);
     });
 
-    return Array.from(map.entries()).map(([day, total]) => ({ day, total }));
+    const result = Array.from(map.values()).map((item) => {
+      const avgGain = item.gains > 0 ? item.grossProfit / item.gains : 0;
+      const avgLoss = item.losses > 0 ? item.grossLossAbs / item.losses : 0;
+
+      let payoff: number | null = null;
+      let payoffLabel = "-";
+
+      if (item.gains > 0 && item.losses === 0) {
+        payoff = null;
+        payoffLabel = "∞";
+      } else if (item.gains === 0 && item.losses > 0) {
+        payoff = 0;
+        payoffLabel = "0,00";
+      } else if (avgLoss > 0) {
+        payoff = avgGain / avgLoss;
+        payoffLabel = formatNumber(payoff);
+      }
+
+      return {
+        ...item,
+        avgGain,
+        avgLoss,
+        payoff,
+        payoffLabel,
+      };
+    });
+
+    return result.sort((a, b) => {
+      const da = a.day.split("/").reverse().join("-");
+      const db = b.day.split("/").reverse().join("-");
+      return db.localeCompare(da);
+    });
   }, [filteredTrades]);
+
+  const bestDay = useMemo(() => {
+    if (!payoffByDay.length) return null;
+    return [...payoffByDay].sort((a, b) => b.net - a.net)[0];
+  }, [payoffByDay]);
+
+  const worstDay = useMemo(() => {
+    if (!payoffByDay.length) return null;
+    return [...payoffByDay].sort((a, b) => a.net - b.net)[0];
+  }, [payoffByDay]);
+
+  function getPayoffQuality(
+    payoff: number | null,
+    gains: number,
+    losses: number
+  ) {
+    if (gains > 0 && losses === 0) {
+      return { label: "Perfeito", color: "#22c55e" };
+    }
+
+    if (gains === 0 && losses > 0) {
+      return { label: "Só loss", color: "#ef4444" };
+    }
+
+    if (payoff === null) {
+      return { label: "-", color: "#94a3b8" };
+    }
+
+    if (payoff >= 2) {
+      return { label: "Excelente", color: "#22c55e" };
+    }
+
+    if (payoff >= 1.5) {
+      return { label: "Bom", color: "#84cc16" };
+    }
+
+    if (payoff >= 1) {
+      return { label: "Ok", color: "#f59e0b" };
+    }
+
+    return { label: "Ruim", color: "#ef4444" };
+  }
+
+  function getDayScore(
+    payoff: number | null,
+    net: number,
+    gains: number,
+    losses: number
+  ) {
+    if (gains > 0 && losses === 0 && net > 0) return "A+";
+    if (payoff !== null && payoff >= 2 && net > 0) return "A";
+    if (payoff !== null && payoff >= 1.5 && net > 0) return "B";
+    if (payoff !== null && payoff >= 1 && net >= 0) return "C";
+    return "D";
+  }
 
   const pieData = useMemo(
     () => [
@@ -690,15 +838,15 @@ function DashboardScreen({
     return {
       appShell: {
         ...styles.appShell,
-        gridTemplateColumns: isMobile ? "1fr" : "440px 1fr",
+        gridTemplateColumns: isMobile ? "1fr" : "280px 1fr",
       } as React.CSSProperties,
       gridCards: {
         ...styles.gridCards,
         gridTemplateColumns: isMobile
           ? "1fr"
           : isNotebook
-          ? "repeat(3, minmax(0, 1fr))"
-          : "repeat(6, minmax(0, 1fr))",
+          ? "repeat(4, minmax(0, 1fr))"
+          : "repeat(8, minmax(0, 1fr))",
       } as React.CSSProperties,
       chartGrid: {
         ...styles.chartGrid,
@@ -725,6 +873,10 @@ function DashboardScreen({
       sidebar: {
         ...styles.sidebar,
         minHeight: isMobile ? "auto" : "100vh",
+      } as React.CSSProperties,
+      dateFilterRow: {
+        ...styles.dateFilterRow,
+        gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
       } as React.CSSProperties,
     };
   }, [screenWidth]);
@@ -806,9 +958,22 @@ function DashboardScreen({
       Status: row.status,
     }));
 
+    const payoffRows = payoffByDay.map((row) => ({
+      Data: row.day,
+      Gains: row.gains,
+      Losses: row.losses,
+      MediaGain: row.avgGain,
+      MediaLoss: row.avgLoss,
+      Payoff: row.payoffLabel,
+      Liquido: row.net,
+    }));
+
     const wb = XLSX.utils.book_new();
     const wsResumo = XLSX.utils.json_to_sheet(summaryRows);
+    const wsPayoff = XLSX.utils.json_to_sheet(payoffRows);
+
     XLSX.utils.book_append_sheet(wb, wsResumo, "Risco e Metas");
+    XLSX.utils.book_append_sheet(wb, wsPayoff, "Payoff por Dia");
 
     const excelBuffer = XLSX.write(wb, {
       bookType: "xlsx",
@@ -840,7 +1005,7 @@ function DashboardScreen({
     <div style={layout.appShell}>
       <aside style={layout.sidebar}>
         <div>
-          <div style={styles.logo}>QBoard</div>
+          <div style={styles.logo}>QiBoard</div>
           <div style={styles.sidebarSub}>Dashboard para qualquer prop firm</div>
         </div>
 
@@ -905,7 +1070,7 @@ function DashboardScreen({
             style={styles.inputDark}
           />
 
-          <div style={styles.dateFilterRow}>
+          <div style={layout.dateFilterRow}>
             <input
               type="date"
               value={startDate}
@@ -943,7 +1108,7 @@ function DashboardScreen({
       <main style={layout.main}>
         <div style={layout.headerRow}>
           <div>
-            <h1 style={styles.title}>QBoard Dashboard</h1>
+            <h1 style={styles.title}>QiBoard - Painel Principal</h1>
             <p style={styles.subtitle}>
               Resumo profissional de performance, risco, metas e execução.
             </p>
@@ -981,9 +1146,21 @@ function DashboardScreen({
             value={`${formatNumber(metrics.winRate)}%`}
           />
           <MetricCard
-            title="Payoff"
+            title="Payoff geral"
             value={formatNumber(metrics.payoff)}
             subtitle="ganho médio ÷ perda média"
+          />
+          <MetricCard
+            title="Melhor dia"
+            value={bestDay ? bestDay.day : "-"}
+            subtitle={bestDay ? formatCurrency(bestDay.net) : "Sem dados"}
+            color="#22c55e"
+          />
+          <MetricCard
+            title="Pior dia"
+            value={worstDay ? worstDay.day : "-"}
+            subtitle={worstDay ? formatCurrency(worstDay.net) : "Sem dados"}
+            color="#ef4444"
           />
         </div>
 
@@ -1071,13 +1248,16 @@ function DashboardScreen({
                       backgroundColor: "#0f172a",
                       border: "1px solid #334155",
                       borderRadius: 12,
+                      color: "#ffffff",
                     }}
+                    labelStyle={{ color: "#93c5fd" }}
+                    itemStyle={{ color: "#ffffff" }}
                   />
                   <Bar dataKey="total" radius={[8, 8, 0, 0]}>
                     {byDay.map((entry, index) => (
                       <Cell
                         key={`cell-${index}`}
-                        fill={entry.total >= 0 ? "#22c55e" : "#ef4444"} // verde | vermelho
+                        fill={entry.total >= 0 ? "#22c55e" : "#ef4444"}
                       />
                     ))}
                   </Bar>
@@ -1233,6 +1413,97 @@ function DashboardScreen({
                         </td>
                       </tr>
                     ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div style={styles.panel}>
+            <div style={styles.panelTitle}>Payoff por dia</div>
+            <div style={styles.tableWrap}>
+              <table style={styles.table}>
+                <thead>
+                  <tr>
+                    <th style={styles.th}>Data</th>
+                    <th style={styles.th}>Gains</th>
+                    <th style={styles.th}>Losses</th>
+                    <th style={styles.th}>Média gain</th>
+                    <th style={styles.th}>Média loss</th>
+                    <th style={styles.th}>Payoff</th>
+                    <th style={styles.th}>Qualidade</th>
+                    <th style={styles.th}>Score</th>
+                    <th style={styles.th}>Líquido</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payoffByDay.map((row) => {
+                    const quality = getPayoffQuality(
+                      row.payoff,
+                      row.gains,
+                      row.losses
+                    );
+                    const score = getDayScore(
+                      row.payoff,
+                      row.net,
+                      row.gains,
+                      row.losses
+                    );
+
+                    return (
+                      <tr key={row.day}>
+                        <td style={styles.td}>{row.day}</td>
+                        <td style={styles.td}>{row.gains}</td>
+                        <td style={styles.td}>{row.losses}</td>
+                        <td style={{ ...styles.td, color: "#22c55e" }}>
+                          {row.gains > 0 ? formatCurrency(row.avgGain) : "-"}
+                        </td>
+                        <td style={{ ...styles.td, color: "#ef4444" }}>
+                          {row.losses > 0 ? formatCurrency(row.avgLoss) : "-"}
+                        </td>
+                        <td
+                          style={{
+                            ...styles.td,
+                            color:
+                              row.payoffLabel === "∞"
+                                ? "#22c55e"
+                                : row.payoff !== null && row.payoff >= 1
+                                ? "#22c55e"
+                                : "#ef4444",
+                            fontWeight: 700,
+                          }}
+                        >
+                          {row.payoffLabel}
+                        </td>
+                        <td style={{ ...styles.td, color: quality.color }}>
+                          {quality.label}
+                        </td>
+                        <td
+                          style={{
+                            ...styles.td,
+                            color:
+                              score === "A+" || score === "A"
+                                ? "#22c55e"
+                                : score === "B"
+                                ? "#84cc16"
+                                : score === "C"
+                                ? "#f59e0b"
+                                : "#ef4444",
+                            fontWeight: 700,
+                          }}
+                        >
+                          {score}
+                        </td>
+                        <td
+                          style={{
+                            ...styles.td,
+                            color: row.net >= 0 ? "#22c55e" : "#ef4444",
+                          }}
+                        >
+                          {formatCurrency(row.net)}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -1393,7 +1664,6 @@ const styles: Record<string, React.CSSProperties> = {
   },
   dateFilterRow: {
     display: "grid",
-    gridTemplateColumns: "1fr 1fr",
     gap: 12,
   },
   secondaryButton: {
@@ -1569,7 +1839,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   loginPanel: {
     width: "100%",
-    maxWidth: 460,
+    maxWidth: 760,
     background: "rgba(15, 23, 42, 0.95)",
     border: "1px solid #223048",
     borderRadius: 24,
