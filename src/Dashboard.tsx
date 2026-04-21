@@ -26,8 +26,8 @@ import {
   getDocs,
   query,
   where,
-  deleteDoc,
-  doc,
+  orderBy,
+  Timestamp,
 } from "firebase/firestore";
 import { auth, googleProvider, db } from "./firebase/config";
 
@@ -63,6 +63,8 @@ type Trade = {
   profit: number;
   createdOn: string;
   day: string;
+  importedFileName?: string;
+  importedAt?: string;
 };
 
 type UserData = {
@@ -81,9 +83,9 @@ type AccountConfig = {
 const COLORS = ["#22c55e", "#ef4444"];
 
 const STORAGE_KEYS = {
-  fileName: "qboard_file_name",
   selectedAccount: "qboard_selected_account",
   search: "qboard_search",
+  selectedFile: "qboard_selected_file",
 };
 
 const ACCOUNT_RULES: Record<string, AccountConfig> = {
@@ -170,7 +172,6 @@ function parseValue(value: unknown): number {
   if (typeof value === "number") return value;
 
   const text = String(value).trim();
-
   const commaDecimal = /^-?\d+,\d+$/.test(text);
   const normalized = commaDecimal
     ? text.replace(/\./g, "").replace(",", ".")
@@ -200,7 +201,9 @@ function getDayLabel(row: RawTradeRow): string {
   return "Sem data";
 }
 
-function buildTrades(rows: RawTradeRow[]): Trade[] {
+function buildTrades(rows: RawTradeRow[], importedFileName: string): Trade[] {
+  const importedAt = new Date().toISOString();
+
   return rows
     .map((row) => {
       const profit = parseMoney(row.profit);
@@ -217,11 +220,14 @@ function buildTrades(rows: RawTradeRow[]): Trade[] {
         profit,
         createdOn: row.created_on?.trim() || row.createdOn?.trim() || "",
         day: getDayLabel(row),
+        importedFileName,
+        importedAt,
       };
     })
     .filter(
       (trade) =>
-        !Number.isNaN(trade.profit) && (trade.account || trade.symbol || trade.orderId)
+        !Number.isNaN(trade.profit) &&
+        (trade.account || trade.symbol || trade.orderId)
     );
 }
 
@@ -292,10 +298,12 @@ function DashboardScreen({
   user: UserData;
 }) {
   const [trades, setTrades] = useState<Trade[]>([]);
-  const [selectedAccount, setSelectedAccount] = useState<string>("Todas");
+  const [selectedAccount, setSelectedAccount] = useState("Todas");
   const [search, setSearch] = useState("");
-  const [fileName, setFileName] = useState("");
-  const [screenWidth, setScreenWidth] = useState<number>(window.innerWidth);
+  const [selectedFile, setSelectedFile] = useState("Todos");
+  const [lastImportedFileName, setLastImportedFileName] = useState("");
+  const [screenWidth, setScreenWidth] = useState(window.innerWidth);
+  const [loadingData, setLoadingData] = useState(false);
 
   useEffect(() => {
     function handleResize() {
@@ -307,20 +315,16 @@ function DashboardScreen({
   }, []);
 
   useEffect(() => {
-    const savedFileName = localStorage.getItem(STORAGE_KEYS.fileName);
     const savedSelectedAccount = localStorage.getItem(
       STORAGE_KEYS.selectedAccount
     );
     const savedSearch = localStorage.getItem(STORAGE_KEYS.search);
+    const savedSelectedFile = localStorage.getItem(STORAGE_KEYS.selectedFile);
 
-    if (savedFileName) setFileName(savedFileName);
     if (savedSelectedAccount) setSelectedAccount(savedSelectedAccount);
     if (savedSearch) setSearch(savedSearch);
+    if (savedSelectedFile) setSelectedFile(savedSelectedFile);
   }, []);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.fileName, fileName);
-  }, [fileName]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.selectedAccount, selectedAccount);
@@ -330,26 +334,36 @@ function DashboardScreen({
     localStorage.setItem(STORAGE_KEYS.search, search);
   }, [search]);
 
-  async function deleteUserTrades() {
-    if (!user?.email) return;
-
-    const q = query(
-      collection(db, "trades"),
-      where("userEmail", "==", user.email)
-    );
-
-    const snapshot = await getDocs(q);
-
-    for (const item of snapshot.docs) {
-      await deleteDoc(doc(db, "trades", item.id));
-    }
-  }
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.selectedFile, selectedFile);
+  }, [selectedFile]);
 
   async function saveTradesToFirestore(importedTrades: Trade[]) {
     if (!user?.email) return;
 
     try {
+      const existingQuery = query(
+        collection(db, "trades"),
+        where("userEmail", "==", user.email)
+      );
+
+      const existingSnapshot = await getDocs(existingQuery);
+      const existingKeys = new Set(
+        existingSnapshot.docs.map((docItem) => {
+          const data = docItem.data();
+          return `${data.userEmail || ""}__${data.orderId || ""}`;
+        })
+      );
+
+      let insertedCount = 0;
+
       for (const trade of importedTrades) {
+        const dedupeKey = `${user.email}__${trade.orderId || ""}`;
+
+        if (trade.orderId && existingKeys.has(dedupeKey)) {
+          continue;
+        }
+
         await addDoc(collection(db, "trades"), {
           userEmail: user.email,
           account: trade.account,
@@ -363,51 +377,90 @@ function DashboardScreen({
           profit: trade.profit,
           createdOn: trade.createdOn,
           day: trade.day,
+          importedFileName: trade.importedFileName || "",
+          importedAt: trade.importedAt || new Date().toISOString(),
         });
+
+        insertedCount += 1;
       }
+
+      alert(
+        insertedCount > 0
+          ? `${insertedCount} trade(s) novo(s) salvo(s) no banco.`
+          : "Nenhum trade novo foi salvo. Os orderId já existem no banco."
+      );
     } catch (error) {
       console.error("Erro ao salvar trades no Firestore:", error);
+      alert("Erro ao salvar trades no banco.");
     }
   }
 
-  async function loadTradesFromFirestore() {
-    if (!user?.email) return;
+ async function loadTradesFromFirestore() {
+  if (!user?.email) return;
 
-    try {
-      const q = query(
-        collection(db, "trades"),
-        where("userEmail", "==", user.email)
-      );
+  try {
+    setLoadingData(true);
 
-      const snapshot = await getDocs(q);
+    const q = query(
+      collection(db, "trades"),
+      where("userEmail", "==", user.email)
+    );
 
-      const loadedTrades: Trade[] = snapshot.docs.map((docItem) => {
-        const data = docItem.data();
+    const snapshot = await getDocs(q);
 
-        return {
-          account: data.account || "",
-          orderId: data.orderId || "",
-          symbol: data.symbol || "",
-          movTime: data.movTime || "",
-          movType: data.movType || "",
-          qty: Number(data.qty || 0),
-          price: Number(data.price || 0),
-          points: Number(data.points || 0),
-          profit: Number(data.profit || 0),
-          createdOn: data.createdOn || "",
-          day: data.day || "",
-        };
-      });
+    const loadedTrades: Trade[] = snapshot.docs.map((docItem) => {
+      const data = docItem.data();
 
-      setTrades(loadedTrades);
-    } catch (error) {
-      console.error("Erro ao carregar trades do Firestore:", error);
+      return {
+        account: data.account || "",
+        orderId: data.orderId || "",
+        symbol: data.symbol || "",
+        movTime: data.movTime || "",
+        movType: data.movType || "",
+        qty: Number(data.qty || 0),
+        price: Number(data.price || 0),
+        points: Number(data.points || 0),
+        profit: Number(data.profit || 0),
+        createdOn: data.createdOn || "",
+        day: data.day || "",
+        importedFileName: data.importedFileName || "",
+        importedAt:
+          data.importedAt?.toDate?.()?.toISOString?.() ||
+          data.importedAt ||
+          "",
+      };
+    });
+
+    loadedTrades.sort((a, b) =>
+      String(b.importedAt || "").localeCompare(String(a.importedAt || ""))
+    );
+
+    setTrades(loadedTrades);
+
+    if (loadedTrades.length > 0) {
+      setLastImportedFileName(loadedTrades[0].importedFileName || "");
     }
+  } catch (error) {
+    console.error("Erro ao carregar trades do Firestore:", error);
+    alert("Erro ao recarregar dados do banco.");
+  } finally {
+    setLoadingData(false);
   }
+}
 
   useEffect(() => {
     loadTradesFromFirestore();
   }, [user?.email]);
+
+  const importedFiles = useMemo(() => {
+    return Array.from(
+      new Set(
+        trades
+          .map((trade) => trade.importedFileName)
+          .filter((value): value is string => Boolean(value))
+      )
+    ).sort((a, b) => a.localeCompare(b));
+  }, [trades]);
 
   const accounts = useMemo(() => {
     return Array.from(new Set(trades.map((trade) => trade.account))).sort();
@@ -418,14 +471,24 @@ function DashboardScreen({
       const accountOk =
         selectedAccount === "Todas" || trade.account === selectedAccount;
 
-      const text =
-        `${trade.account} ${trade.symbol} ${trade.day} ${trade.orderId}`.toLowerCase();
+      const fileOk =
+        selectedFile === "Todos" || trade.importedFileName === selectedFile;
+
+      const text = [
+        trade.account,
+        trade.symbol,
+        trade.day,
+        trade.orderId,
+        trade.importedFileName || "",
+      ]
+        .join(" ")
+        .toLowerCase();
 
       const searchOk = text.includes(search.toLowerCase());
 
-      return accountOk && searchOk;
+      return accountOk && fileOk && searchOk;
     });
-  }, [trades, selectedAccount, search]);
+  }, [trades, selectedAccount, selectedFile, search]);
 
   const metrics = useMemo(() => {
     const positive = filteredTrades.filter((t) => t.profit > 0);
@@ -614,13 +677,13 @@ function DashboardScreen({
     rows: RawTradeRow[],
     importedFileName: string
   ) {
-    const parsedTrades = buildTrades(rows);
+    const parsedTrades = buildTrades(rows, importedFileName);
 
-    await deleteUserTrades();
     await saveTradesToFirestore(parsedTrades);
+    await loadTradesFromFirestore();
 
-    setTrades(parsedTrades);
-    setFileName(importedFileName);
+    setLastImportedFileName(importedFileName);
+    setSelectedFile(importedFileName);
   }
 
   function handleCsvFile(file: File) {
@@ -703,15 +766,14 @@ function DashboardScreen({
     saveAs(blob, "qboard-risco-metas.xlsx");
   }
 
-  function clearLocalData() {
-    localStorage.removeItem(STORAGE_KEYS.fileName);
+  function clearLocalFilters() {
     localStorage.removeItem(STORAGE_KEYS.selectedAccount);
     localStorage.removeItem(STORAGE_KEYS.search);
+    localStorage.removeItem(STORAGE_KEYS.selectedFile);
 
-    setTrades([]);
-    setFileName("");
     setSelectedAccount("Todas");
     setSearch("");
+    setSelectedFile("Todos");
   }
 
   return (
@@ -744,12 +806,25 @@ function DashboardScreen({
             />
           </label>
           <div style={styles.fileName}>
-            {fileName || "Nenhum arquivo importado"}
+            Último arquivo: {lastImportedFileName || "Nenhum"}
           </div>
         </div>
 
         <div style={styles.sideBox}>
-          <div style={styles.sideBoxTitle}>Filtro</div>
+          <div style={styles.sideBoxTitle}>Consulta do histórico</div>
+          <select
+            value={selectedFile}
+            onChange={(e) => setSelectedFile(e.target.value)}
+            style={styles.select}
+          >
+            <option value="Todos">Todos os arquivos</option>
+            {importedFiles.map((file) => (
+              <option key={file} value={file}>
+                {file}
+              </option>
+            ))}
+          </select>
+
           <select
             value={selectedAccount}
             onChange={(e) => setSelectedAccount(e.target.value)}
@@ -766,18 +841,21 @@ function DashboardScreen({
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Buscar conta, símbolo, data..."
+            placeholder="Buscar conta, símbolo, data, arquivo..."
             style={styles.inputDark}
           />
         </div>
 
         <div style={styles.sideBox}>
           <div style={styles.sideBoxTitle}>Ações</div>
+          <button style={styles.actionButton} onClick={loadTradesFromFirestore}>
+            Recarregar do banco
+          </button>
           <button style={styles.actionButton} onClick={exportSummaryExcel}>
             Exportar risco e metas
           </button>
-          <button style={styles.clearButton} onClick={clearLocalData}>
-            Limpar dados locais
+          <button style={styles.clearButton} onClick={clearLocalFilters}>
+            Limpar filtros locais
           </button>
         </div>
 
@@ -792,6 +870,11 @@ function DashboardScreen({
             <h1 style={styles.title}>QBoard Dashboard</h1>
             <p style={styles.subtitle}>
               Resumo profissional de performance, risco, metas e execução.
+            </p>
+            <p style={styles.subtitle}>
+              {loadingData
+                ? "Carregando dados do banco..."
+                : `Histórico carregado: ${filteredTrades.length} trade(s)`}
             </p>
           </div>
         </div>
@@ -1024,11 +1107,12 @@ function DashboardScreen({
           </div>
 
           <div style={styles.panel}>
-            <div style={styles.panelTitle}>Últimos trades com profit</div>
+            <div style={styles.panelTitle}>Histórico de trades</div>
             <div style={styles.tableWrap}>
               <table style={styles.table}>
                 <thead>
                   <tr>
+                    <th style={styles.th}>Arquivo</th>
                     <th style={styles.th}>Data</th>
                     <th style={styles.th}>Conta</th>
                     <th style={styles.th}>Símbolo</th>
@@ -1038,12 +1122,20 @@ function DashboardScreen({
                 </thead>
                 <tbody>
                   {filteredTrades
-                    .slice(-12)
-                    .reverse()
+                    .slice()
+                    .sort((a, b) =>
+                      String(b.importedAt || "").localeCompare(
+                        String(a.importedAt || "")
+                      )
+                    )
+                    .slice(0, 200)
                     .map((trade) => (
                       <tr
-                        key={`${trade.orderId}-${trade.createdOn}-${trade.profit}`}
+                        key={`${trade.orderId}-${trade.createdOn}-${trade.importedAt}-${trade.importedFileName}`}
                       >
+                        <td style={styles.td}>
+                          {trade.importedFileName || "-"}
+                        </td>
                         <td style={styles.td}>{trade.day}</td>
                         <td style={styles.td}>{trade.account}</td>
                         <td style={styles.td}>{trade.symbol}</td>
