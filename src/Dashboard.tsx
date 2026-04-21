@@ -769,7 +769,7 @@ function DashboardScreen({
                   <XAxis dataKey="day" stroke="#94a3b8" />
                   <YAxis stroke="#94a3b8" />
                   <Tooltip
-                    formatter={(value: number) => formatCurrency(Number(value))}
+                    formatter={(value) => formatCurrency(Number(value ?? 0))}
                     contentStyle={{
                       backgroundColor: "#0f172a",
                       border: "1px solid #334155",
