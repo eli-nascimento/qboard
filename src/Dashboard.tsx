@@ -26,8 +26,6 @@ import {
   getDocs,
   query,
   where,
-  orderBy,
-  Timestamp,
 } from "firebase/firestore";
 import { auth, googleProvider, db } from "./firebase/config";
 
