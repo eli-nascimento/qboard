@@ -19,6 +19,7 @@ import {
   signInWithPopup,
   signOut,
   signInWithEmailAndPassword,
+  sendPasswordResetEmail,
   type User,
 } from "firebase/auth";
 import {
@@ -336,6 +337,52 @@ function MetricCard({
   );
 }
 
+type AppMessageState = {
+  type: "success" | "error" | "info";
+  title: string;
+  message: string;
+};
+
+function AppMessageModal({
+  popup,
+  onClose,
+}: {
+  popup: AppMessageState | null;
+  onClose: () => void;
+}) {
+  if (!popup) return null;
+
+  const tone =
+    popup.type === "success"
+      ? { background: "rgba(34,197,94,0.15)", color: "#22c55e", label: "Sucesso" }
+      : popup.type === "error"
+      ? { background: "rgba(239,68,68,0.15)", color: "#f87171", label: "Atenção" }
+      : { background: "rgba(59,130,246,0.15)", color: "#60a5fa", label: "Informação" };
+
+  return (
+    <div style={styles.modalOverlay}>
+      <div style={styles.messageCard}>
+        <div
+          style={{
+            ...styles.messageBadge,
+            background: tone.background,
+            color: tone.color,
+          }}
+        >
+          {tone.label}
+        </div>
+        <div style={styles.modalTitle}>{popup.title}</div>
+        <div style={styles.modalText}>{popup.message}</div>
+        <div style={styles.messageButtonRow}>
+          <button style={styles.modalPrimaryButton} onClick={onClose}>
+            OK
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function LoginScreen({
   onGoogleLogin,
   onEmailLogin,
@@ -353,74 +400,224 @@ function LoginScreen({
   passwordLogin: string;
   setPasswordLogin: React.Dispatch<React.SetStateAction<string>>;
 }) {
+  const [showResetPopup, setShowResetPopup] = useState(false);
+  const [resetEmail, setResetEmail] = useState("");
+  const [resetLoading, setResetLoading] = useState(false);
+  const [messagePopup, setMessagePopup] = useState<{
+    type: "success" | "error";
+    title: string;
+    message: string;
+  } | null>(null);
+
+  function closeMessagePopup() {
+    setMessagePopup(null);
+  }
+
+  function normalizeFirebaseMessage(error: any) {
+    const code = error?.code || "";
+
+    switch (code) {
+      case "auth/user-not-found":
+        return "Não encontramos uma conta com esse email.";
+      case "auth/invalid-email":
+        return "Digite um email válido.";
+      case "auth/missing-email":
+        return "Informe o email para receber o link.";
+      case "auth/too-many-requests":
+        return "Muitas tentativas. Aguarde alguns minutos e tente novamente.";
+      default:
+        return error?.message || "Não foi possível enviar o link de redefinição.";
+    }
+  }
+
+  async function handleForgotPassword() {
+    if (!resetEmail.trim()) {
+      setMessagePopup({
+        type: "error",
+        title: "Email obrigatório",
+        message: "Digite o email para receber o link de redefinição.",
+      });
+      return;
+    }
+
+    try {
+      setResetLoading(true);
+      await sendPasswordResetEmail(auth, resetEmail.trim());
+      setShowResetPopup(false);
+      setMessagePopup({
+        type: "success",
+        title: "Link enviado",
+        message:
+          "Enviamos um link para redefinir sua senha. Depois de salvar a nova senha, volte para a tela de login e teste o acesso.",
+      });
+      setResetEmail("");
+    } catch (error: any) {
+      console.error("Erro ao enviar redefinição de senha:", error);
+      setMessagePopup({
+        type: "error",
+        title: "Não foi possível enviar",
+        message: normalizeFirebaseMessage(error),
+      });
+    } finally {
+      setResetLoading(false);
+    }
+  }
+
   return (
-    <div style={styles.loginWrap}>
-      <div style={styles.loginPanel}>
-        <div style={styles.brandBadge}>QiBoard</div>
-        <h1 style={styles.loginTitle}>
-          Painel profissional para contas mesas proprietárias
-        </h1>
-        <p style={styles.loginText}>
-          Faça login com sua conta Google ou com email e senha para acessar o
-          dashboard.
-        </p>
+    <>
+      <div style={styles.loginWrap}>
+        <div style={styles.loginPanel}>
+          <div style={styles.brandBadge}>QiBoard</div>
+          <h1 style={styles.loginTitle}>
+            Painel profissional para contas mesas proprietárias
+          </h1>
+          <p style={styles.loginText}>
+            Faça login com sua conta Google ou com email e senha para acessar o
+            dashboard.
+          </p>
 
-        <input
-          type="email"
-          placeholder="Digite seu email"
-          value={emailLogin}
-          onChange={(e) => setEmailLogin(e.target.value)}
-          style={styles.loginInput}
-        />
+          <input
+            type="email"
+            placeholder="Digite seu email"
+            value={emailLogin}
+            onChange={(e) => setEmailLogin(e.target.value)}
+            style={styles.loginInput}
+          />
 
-        <input
-          type="password"
-          placeholder="Digite sua senha"
-          value={passwordLogin}
-          onChange={(e) => setPasswordLogin(e.target.value)}
-          style={styles.loginInput}
-        />
+          <input
+            type="password"
+            placeholder="Digite sua senha"
+            value={passwordLogin}
+            onChange={(e) => setPasswordLogin(e.target.value)}
+            style={styles.loginInput}
+          />
 
-        <button
-          style={styles.googleButton}
-          onClick={onEmailLogin}
-          disabled={loading}
-        >
-          {loading ? "Entrando..." : "Entrar com email"}
-        </button>
+          <div style={styles.loginLinkRow}>
+            <button
+              type="button"
+              style={styles.inlineLinkButton}
+              onClick={() => {
+                setResetEmail(emailLogin);
+                setShowResetPopup(true);
+              }}
+            >
+              Esqueci a senha
+            </button>
+          </div>
 
-        <button
-  style={styles.googleLoginButton}
-  onClick={onGoogleLogin}
-  disabled={loading}
->
-  <span style={styles.googleIconWrap}>
-    <svg width="18" height="18" viewBox="0 0 48 48">
-      <path
-        fill="#FFC107"
-        d="M43.611 20.083H42V20H24v8h11.303C33.655 32.657 29.195 36 24 36c-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.96 3.04l5.657-5.657C34.046 6.053 29.277 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z"
-      />
-      <path
-        fill="#FF3D00"
-        d="M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.96 3.04l5.657-5.657C34.046 6.053 29.277 4 24 4 16.318 4 9.656 8.337 6.306 14.691z"
-      />
-      <path
-        fill="#4CAF50"
-        d="M24 44c5.176 0 9.86-1.977 13.409-5.192l-6.19-5.238C29.143 35.091 26.715 36 24 36c-5.174 0-9.623-3.326-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z"
-      />
-      <path
-        fill="#1976D2"
-        d="M43.611 20.083H42V20H24v8h11.303c-.792 2.237-2.231 4.166-4.084 5.571l.003-.002 6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z"
-      />
-    </svg>
-  </span>
+          <button
+            style={styles.googleButton}
+            onClick={onEmailLogin}
+            disabled={loading}
+          >
+            {loading ? "Entrando..." : "Entrar com email"}
+          </button>
 
-  <span>{loading ? "Entrando..." : "Entrar com Google"}</span>
-</button>
+          <button
+            style={styles.googleLoginButton}
+            onClick={onGoogleLogin}
+            disabled={loading}
+          >
+            <span style={styles.googleIconWrap}>
+              <svg width="18" height="18" viewBox="0 0 48 48">
+                <path
+                  fill="#FFC107"
+                  d="M43.611 20.083H42V20H24v8h11.303C33.655 32.657 29.195 36 24 36c-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.96 3.04l5.657-5.657C34.046 6.053 29.277 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z"
+                />
+                <path
+                  fill="#FF3D00"
+                  d="M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.96 3.04l5.657-5.657C34.046 6.053 29.277 4 24 4 16.318 4 9.656 8.337 6.306 14.691z"
+                />
+                <path
+                  fill="#4CAF50"
+                  d="M24 44c5.176 0 9.86-1.977 13.409-5.192l-6.19-5.238C29.143 35.091 26.715 36 24 36c-5.174 0-9.623-3.326-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z"
+                />
+                <path
+                  fill="#1976D2"
+                  d="M43.611 20.083H42V20H24v8h11.303c-.792 2.237-2.231 4.166-4.084 5.571l.003-.002 6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z"
+                />
+              </svg>
+            </span>
+
+            <span>{loading ? "Entrando..." : "Entrar com Google"}</span>
+          </button>
+        </div>
       </div>
-    </div>
+
+      {showResetPopup ? (
+        <div style={styles.modalOverlay}>
+          <div style={styles.modalCard}>
+            <div style={styles.modalHeaderRow}>
+              <div>
+                <div style={styles.modalTitle}>Esqueci a senha</div>
+                <div style={styles.modalText}>
+                  Digite seu email para receber o link de redefinição.
+                </div>
+              </div>
+            </div>
+
+            <input
+              type="email"
+              placeholder="Digite seu email"
+              value={resetEmail}
+              onChange={(e) => setResetEmail(e.target.value)}
+              style={styles.loginInput}
+            />
+
+            <div style={styles.modalButtonsRow}>
+              <button
+                style={styles.modalGhostButton}
+                onClick={() => {
+                  if (!resetLoading) {
+                    setShowResetPopup(false);
+                  }
+                }}
+                disabled={resetLoading}
+              >
+                Cancelar
+              </button>
+              <button
+                style={styles.modalPrimaryButton}
+                onClick={handleForgotPassword}
+                disabled={resetLoading}
+              >
+                {resetLoading ? "Enviando..." : "Enviar link"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {messagePopup ? (
+        <div style={styles.modalOverlay}>
+          <div style={styles.messageCard}>
+            <div
+              style={{
+                ...styles.messageBadge,
+                background:
+                  messagePopup.type === "success"
+                    ? "rgba(34,197,94,0.15)"
+                    : "rgba(239,68,68,0.15)",
+                color:
+                  messagePopup.type === "success" ? "#22c55e" : "#f87171",
+              }}
+            >
+              {messagePopup.type === "success" ? "Sucesso" : "Atenção"}
+            </div>
+            <div style={styles.modalTitle}>{messagePopup.title}</div>
+            <div style={styles.modalText}>{messagePopup.message}</div>
+            <div style={styles.messageButtonRow}>
+              <button style={styles.modalPrimaryButton} onClick={closeMessagePopup}>
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
   );
 }
+
 
 function DashboardScreen({
   onLogout,
@@ -440,6 +637,15 @@ function DashboardScreen({
   const [lastImportedFileName, setLastImportedFileName] = useState("");
   const [screenWidth, setScreenWidth] = useState(window.innerWidth);
   const [loadingData, setLoadingData] = useState(false);
+  const [messagePopup, setMessagePopup] = useState<AppMessageState | null>(null);
+
+  function showMessage(
+    title: string,
+    message: string,
+    type: AppMessageState["type"] = "info"
+  ) {
+    setMessagePopup({ title, message, type });
+  }
 
   useEffect(() => {
     function handleResize() {
@@ -548,14 +754,16 @@ function DashboardScreen({
         insertedCount += 1;
       }
 
-      alert(
+      showMessage(
+        insertedCount > 0 ? "Importação concluída" : "Nenhum trade novo salvo",
         insertedCount > 0
           ? `${insertedCount} trade(s) novo(s) salvo(s) no banco.`
-          : "Nenhum trade novo foi salvo. Os orderId já existem no banco."
+          : "Nenhum trade novo foi salvo. Os orderId já existem no banco.",
+        insertedCount > 0 ? "success" : "info"
       );
     } catch (error) {
       console.error("Erro ao salvar trades no Firestore:", error);
-      alert("Erro ao salvar trades no banco.");
+      showMessage("Erro ao salvar", "Erro ao salvar trades no banco.", "error");
     }
   }
 
@@ -606,7 +814,7 @@ function DashboardScreen({
       }
     } catch (error) {
       console.error("Erro ao carregar trades do Firestore:", error);
-      alert("Erro ao recarregar dados do banco.");
+      showMessage("Erro ao carregar", "Erro ao recarregar dados do banco.", "error");
     } finally {
       setLoadingData(false);
     }
@@ -1141,7 +1349,7 @@ function DashboardScreen({
       return;
     }
 
-    alert("Formato não suportado. Use .csv, .xlsx ou .xls");
+    showMessage("Formato não suportado", "Use .csv, .xlsx ou .xls", "error");
   }
 
   function exportSummaryExcel() {
@@ -1213,7 +1421,8 @@ function DashboardScreen({
   }
 
   return (
-    <div style={layout.appShell}>
+    <>
+      <div style={layout.appShell}>
       <aside style={layout.sidebar}>
         <div>
           <div style={styles.logo}>QiBoard</div>
@@ -1782,6 +1991,11 @@ function DashboardScreen({
         </div>
       </main>
     </div>
+      <AppMessageModal
+        popup={messagePopup}
+        onClose={() => setMessagePopup(null)}
+      />
+    </>
   );
 }
 
@@ -1792,6 +2006,15 @@ export default function QiBoard() {
   const [loginLoading, setLoginLoading] = useState(false);
   const [emailLogin, setEmailLogin] = useState("");
   const [passwordLogin, setPasswordLogin] = useState("");
+  const [messagePopup, setMessagePopup] = useState<AppMessageState | null>(null);
+
+  function showMessage(
+    title: string,
+    message: string,
+    type: AppMessageState["type"] = "info"
+  ) {
+    setMessagePopup({ title, message, type });
+  }
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
@@ -1802,7 +2025,7 @@ export default function QiBoard() {
           if (!appUser.active) {
             setUser(null);
             await signOut(auth);
-            alert("Seu acesso ainda não está ativo.");
+            showMessage("Acesso inativo", "Seu acesso ainda não está ativo.", "error");
           } else {
             setUser(mapFirebaseUser(firebaseUser));
           }
@@ -1830,15 +2053,17 @@ export default function QiBoard() {
       const appUser = await ensureAppUser(firebaseUser);
 
       if (!appUser.active) {
-        alert(
-          `O usuário ${firebaseUser.email} foi cadastrado, mas ainda está inativo.`
+        showMessage(
+          "Acesso inativo",
+          `O usuário ${firebaseUser.email} foi cadastrado, mas ainda está inativo.`,
+          "error"
         );
         await signOut(auth);
         return;
       }
     } catch (error) {
       console.error("Erro ao fazer login com Google:", error);
-      alert("Não foi possível entrar com Google.");
+      showMessage("Falha no login", "Não foi possível entrar com Google.", "error");
     } finally {
       setLoginLoading(false);
     }
@@ -1858,15 +2083,17 @@ export default function QiBoard() {
       const appUser = await ensureAppUser(firebaseUser);
 
       if (!appUser.active) {
-        alert(
-          `O usuário ${firebaseUser.email} está cadastrado, mas ainda está inativo.`
+        showMessage(
+          "Acesso inativo",
+          `O usuário ${firebaseUser.email} está cadastrado, mas ainda está inativo.`,
+          "error"
         );
         await signOut(auth);
         return;
       }
     } catch (error) {
       console.error("Erro ao fazer login com email e senha:", error);
-      alert("Não foi possível entrar com email e senha.");
+      showMessage("Falha no login", "Não foi possível entrar com email e senha.", "error");
     } finally {
       setLoginLoading(false);
     }
@@ -1878,27 +2105,47 @@ export default function QiBoard() {
 
   if (authLoading) {
     return (
-      <div style={styles.loadingScreen}>
-        <div style={styles.loadingText}>Carregando sessão...</div>
-      </div>
+      <>
+        <div style={styles.loadingScreen}>
+          <div style={styles.loadingText}>Carregando sessão...</div>
+        </div>
+        <AppMessageModal
+          popup={messagePopup}
+          onClose={() => setMessagePopup(null)}
+        />
+      </>
     );
   }
 
   if (!user) {
     return (
-      <LoginScreen
-        onGoogleLogin={handleGoogleLogin}
-        onEmailLogin={handleEmailLogin}
-        loading={loginLoading}
-        emailLogin={emailLogin}
-        setEmailLogin={setEmailLogin}
-        passwordLogin={passwordLogin}
-        setPasswordLogin={setPasswordLogin}
-      />
+      <>
+        <LoginScreen
+          onGoogleLogin={handleGoogleLogin}
+          onEmailLogin={handleEmailLogin}
+          loading={loginLoading}
+          emailLogin={emailLogin}
+          setEmailLogin={setEmailLogin}
+          passwordLogin={passwordLogin}
+          setPasswordLogin={setPasswordLogin}
+        />
+        <AppMessageModal
+          popup={messagePopup}
+          onClose={() => setMessagePopup(null)}
+        />
+      </>
     );
   }
 
-  return <DashboardScreen onLogout={handleLogout} user={user} />;
+  return (
+    <>
+      <DashboardScreen onLogout={handleLogout} user={user} />
+      <AppMessageModal
+        popup={messagePopup}
+        onClose={() => setMessagePopup(null)}
+      />
+    </>
+  );
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -2244,6 +2491,107 @@ const styles: Record<string, React.CSSProperties> = {
   },
   loadingText: {
     fontSize: 24,
+    fontWeight: 700,
+  },
+  loginLinkRow: {
+    display: "flex",
+    justifyContent: "flex-end",
+    marginTop: -4,
+    marginBottom: 4,
+  },
+  inlineLinkButton: {
+    background: "transparent",
+    border: "none",
+    color: "#93c5fd",
+    cursor: "pointer",
+    fontSize: 13,
+    padding: 0,
+    textDecoration: "underline",
+  },
+  modalOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(2, 6, 23, 0.76)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 9999,
+    padding: 16,
+  },
+  modalCard: {
+    width: "100%",
+    maxWidth: 440,
+    background: "linear-gradient(180deg, #111c2e 0%, #0f172a 100%)",
+    border: "1px solid #223048",
+    borderRadius: 20,
+    boxShadow: "0 20px 60px rgba(0,0,0,0.45)",
+    padding: 24,
+    display: "flex",
+    flexDirection: "column",
+    gap: 16,
+  },
+  messageCard: {
+    width: "100%",
+    maxWidth: 420,
+    background: "linear-gradient(180deg, #111c2e 0%, #0f172a 100%)",
+    border: "1px solid #223048",
+    borderRadius: 20,
+    boxShadow: "0 20px 60px rgba(0,0,0,0.45)",
+    padding: 24,
+    display: "flex",
+    flexDirection: "column",
+    gap: 12,
+  },
+  modalHeaderRow: {
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  modalTitle: {
+    color: "#f8fafc",
+    fontSize: 22,
+    fontWeight: 700,
+  },
+  modalText: {
+    color: "#94a3b8",
+    fontSize: 14,
+    lineHeight: 1.5,
+    marginTop: 6,
+  },
+  modalButtonsRow: {
+    display: "flex",
+    justifyContent: "flex-end",
+    gap: 10,
+  },
+  messageButtonRow: {
+    display: "flex",
+    justifyContent: "flex-end",
+    marginTop: 4,
+  },
+  modalGhostButton: {
+    padding: "12px 16px",
+    borderRadius: 12,
+    border: "1px solid #334155",
+    background: "transparent",
+    color: "#e2e8f0",
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  modalPrimaryButton: {
+    padding: "12px 16px",
+    borderRadius: 12,
+    border: "none",
+    background: "#2563eb",
+    color: "#ffffff",
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  messageBadge: {
+    alignSelf: "flex-start",
+    padding: "6px 10px",
+    borderRadius: 999,
+    fontSize: 12,
     fontWeight: 700,
   },
   googleLoginButton: {
