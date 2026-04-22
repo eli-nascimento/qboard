@@ -455,7 +455,7 @@ function LoginScreen({
   return (
     <div style={styles.loginWrap}>
       <div style={styles.loginPanel}>
-        <div style={styles.brandBadge}>QiBoard</div>
+        <div style={styles.brandBadge}>Kiboard</div>
         <h1 style={styles.loginTitle}>
           Painel profissional para contas mesas proprietárias
         </h1>
@@ -1372,7 +1372,7 @@ function DashboardScreen({
     <div style={layout.appShell}>
       <aside style={layout.sidebar}>
         <div>
-          <div style={styles.logo}>QiBoard</div>
+          <div style={styles.logo}>Kiboard</div>
           <div style={styles.sidebarSub}>Dashboard para qualquer prop firm</div>
         </div>
 
@@ -1494,7 +1494,7 @@ function DashboardScreen({
       <main style={layout.main}>
         <div style={layout.headerRow}>
           <div>
-            <h1 style={styles.title}>QiBoard - Painel Principal</h1>
+            <h1 style={styles.title}>Kiboard - Painel Principal</h1>
             <p style={styles.subtitle}>
               Relatório profissional de performance, risco, metas e execução.
             </p>
