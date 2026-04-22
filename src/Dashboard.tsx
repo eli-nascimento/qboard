@@ -93,6 +93,8 @@ const STORAGE_KEYS = {
   selectedFile: "qboard_selected_file",
   startDate: "qboard_start_date",
   endDate: "qboard_end_date",
+  accountCategory: "qboard_account_category",
+  accountStatus: "qboard_account_status",
 };
 
 const ACCOUNT_RULES: Record<string, AccountConfig> = {
@@ -122,8 +124,28 @@ const ACCOUNT_RULES: Record<string, AccountConfig> = {
   },
 };
 
+const PA_ACCOUNT_CONFIGS: Record<string, AccountConfig> = {
+  "PA-APEX-244134-47": {
+    balanceStart: 25000,
+    trailingDrawdown: 1500,
+    profitTarget: 0,
+    typeLabel: "PA 25k",
+  },
+  // Adicione aqui outras PAs quando quiser que o resumo calcule
+  // balance, liquidation threshold e drawdown com base no tamanho correto.
+  // Exemplo:
+  // "PA-APEX-XXXXXXXX-YY": {
+  //   balanceStart: 50000,
+  //   trailingDrawdown: 2500,
+  //   profitTarget: 0,
+  //   typeLabel: "PA 50k",
+  // },
+};
+
 function detectAccountConfig(account: string): AccountConfig {
-  if (account.startsWith("PA-")) return ACCOUNT_RULES.PA;
+  if (account.startsWith("PA-")) {
+    return PA_ACCOUNT_CONFIGS[account] || ACCOUNT_RULES.PA;
+  }
 
   if (
     account.includes("-303") ||
@@ -142,6 +164,14 @@ function detectAccountConfig(account: string): AccountConfig {
   }
 
   return ACCOUNT_RULES.APEX25;
+}
+
+function isPAAccount(account: string) {
+  return account.trim().toUpperCase().startsWith("PA-");
+}
+
+function getAccountCategoryLabel(account: string) {
+  return isPAAccount(account) ? "Aprovada / PA" : "Avaliação";
 }
 
 function formatCurrency(value: number) {
@@ -405,6 +435,8 @@ function DashboardScreen({
   const [selectedFile, setSelectedFile] = useState("Todos");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  const [accountCategory, setAccountCategory] = useState("Todas");
+  const [accountStatus, setAccountStatus] = useState("Todas");
   const [lastImportedFileName, setLastImportedFileName] = useState("");
   const [screenWidth, setScreenWidth] = useState(window.innerWidth);
   const [loadingData, setLoadingData] = useState(false);
@@ -426,12 +458,20 @@ function DashboardScreen({
     const savedSelectedFile = localStorage.getItem(STORAGE_KEYS.selectedFile);
     const savedStartDate = localStorage.getItem(STORAGE_KEYS.startDate);
     const savedEndDate = localStorage.getItem(STORAGE_KEYS.endDate);
+    const savedAccountCategory = localStorage.getItem(
+      STORAGE_KEYS.accountCategory
+    );
+    const savedAccountStatus = localStorage.getItem(
+      STORAGE_KEYS.accountStatus
+    );
 
     if (savedSelectedAccount) setSelectedAccount(savedSelectedAccount);
     if (savedSearch) setSearch(savedSearch);
     if (savedSelectedFile) setSelectedFile(savedSelectedFile);
     if (savedStartDate) setStartDate(savedStartDate);
     if (savedEndDate) setEndDate(savedEndDate);
+    if (savedAccountCategory) setAccountCategory(savedAccountCategory);
+    if (savedAccountStatus) setAccountStatus(savedAccountStatus);
   }, []);
 
   useEffect(() => {
@@ -453,6 +493,14 @@ function DashboardScreen({
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.endDate, endDate);
   }, [endDate]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.accountCategory, accountCategory);
+  }, [accountCategory]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.accountStatus, accountStatus);
+  }, [accountStatus]);
 
   async function saveTradesToFirestore(importedTrades: Trade[]) {
     if (!user?.email) return;
@@ -630,6 +678,11 @@ function DashboardScreen({
       const fileOk =
         selectedFile === "Todos" || trade.importedFileName === selectedFile;
 
+      const categoryOk =
+        accountCategory === "Todas" ||
+        (accountCategory === "Aprovadas" && isPAAccount(trade.account)) ||
+        (accountCategory === "Avaliação" && !isPAAccount(trade.account));
+
       const text = [
         trade.account,
         trade.symbol,
@@ -643,9 +696,17 @@ function DashboardScreen({
       const searchOk = text.includes(search.toLowerCase());
       const dateOk = tradeMatchesDateRange(trade);
 
-      return accountOk && fileOk && searchOk && dateOk;
+      return accountOk && fileOk && categoryOk && searchOk && dateOk;
     });
-  }, [trades, selectedAccount, selectedFile, search, startDate, endDate]);
+  }, [
+    trades,
+    selectedAccount,
+    selectedFile,
+    accountCategory,
+    search,
+    startDate,
+    endDate,
+  ]);
 
   const metrics = useMemo(() => {
     const positive = filteredTrades.filter((t) => t.profit > 0);
@@ -711,39 +772,59 @@ function DashboardScreen({
   const riskByAccount = useMemo(() => {
     return byAccount.map((row) => {
       const cfg = detectAccountConfig(row.account);
-      const balanceCurrent =
-        cfg.typeLabel === "PA" ? row.net : cfg.balanceStart + row.net;
+      const liquidationThresholdBase =
+        cfg.balanceStart > 0 ? cfg.balanceStart - cfg.trailingDrawdown : 0;
 
-      const drawdownAvailable =
-        cfg.typeLabel === "PA"
-          ? 0
-          : balanceCurrent - (cfg.balanceStart - cfg.trailingDrawdown);
+      const balanceCurrent =
+        cfg.balanceStart > 0 ? cfg.balanceStart + row.net : row.net;
+
+      const liquidationThresholdCurrent =
+        cfg.balanceStart > 0
+          ? liquidationThresholdBase + row.net
+          : liquidationThresholdBase;
+
+      const dailyDrawdown =
+        cfg.balanceStart > 0
+          ? balanceCurrent - liquidationThresholdCurrent
+          : cfg.trailingDrawdown;
+
+      const drawdownAvailable = dailyDrawdown;
 
       const distanceToTarget =
-        cfg.typeLabel === "PA" ? 0 : cfg.profitTarget - row.net;
+        cfg.profitTarget > 0 ? cfg.profitTarget - row.net : 0;
 
       const progressToTarget =
-        cfg.typeLabel === "PA"
-          ? 0
-          : Math.max(0, Math.min(100, (row.net / cfg.profitTarget) * 100));
+        cfg.profitTarget > 0
+          ? Math.max(0, Math.min(100, (row.net / cfg.profitTarget) * 100))
+          : 0;
 
       const riskPerDay =
-        cfg.typeLabel === "PA" ? 0 : Math.max(0, drawdownAvailable * 0.05);
+        dailyDrawdown > 0 ? Math.max(0, dailyDrawdown * 0.05) : 0;
 
-      let status = "Saudável";
-      if (cfg.typeLabel !== "PA") {
-        if (drawdownAvailable <= 0) status = "Falhou";
-        else if (drawdownAvailable < cfg.trailingDrawdown * 0.2)
-          status = "Crítico";
-        else if (drawdownAvailable < cfg.trailingDrawdown * 0.4)
+      let status = "Ativa";
+
+      if (cfg.balanceStart > 0) {
+        if (dailyDrawdown <= 0) {
+          status = "Reprovada";
+        } else if (dailyDrawdown < cfg.trailingDrawdown * 0.2) {
+          status = "Crítica";
+        } else if (dailyDrawdown < cfg.trailingDrawdown * 0.4) {
           status = "Atenção";
+        } else {
+          status = "Ativa";
+        }
       }
 
       return {
         account: row.account,
+        category: getAccountCategoryLabel(row.account),
+        isPA: isPAAccount(row.account),
         typeLabel: cfg.typeLabel,
         balanceStart: cfg.balanceStart,
+        liquidationThresholdBase,
         balanceCurrent,
+        liquidationThresholdCurrent,
+        dailyDrawdown,
         drawdownAvailable,
         trailingDrawdown: cfg.trailingDrawdown,
         target: cfg.profitTarget,
@@ -759,12 +840,33 @@ function DashboardScreen({
     });
   }, [byAccount]);
 
+  const filteredRiskAccounts = useMemo(() => {
+    return riskByAccount.filter((row) => {
+      const categoryOk =
+        accountCategory === "Todas" ||
+        (accountCategory === "Aprovadas" && row.isPA) ||
+        (accountCategory === "Avaliação" && !row.isPA);
+
+      const statusOk =
+        accountStatus === "Todas" ||
+        (accountStatus === "Ativas" && row.status !== "Reprovada") ||
+        (accountStatus === "Reprovadas" && row.status === "Reprovada");
+
+      const selectedAccountOk =
+        selectedAccount === "Todas" || row.account === selectedAccount;
+
+      return categoryOk && statusOk && selectedAccountOk;
+    });
+  }, [riskByAccount, accountCategory, accountStatus, selectedAccount]);
+
   const selectedRiskAccount = useMemo(() => {
     if (selectedAccount !== "Todas") {
-      return riskByAccount.find((r) => r.account === selectedAccount) || null;
+      return (
+        filteredRiskAccounts.find((r) => r.account === selectedAccount) || null
+      );
     }
-    return riskByAccount[0] || null;
-  }, [riskByAccount, selectedAccount]);
+    return filteredRiskAccounts[0] || null;
+  }, [filteredRiskAccounts, selectedAccount]);
 
   const byDay = useMemo(() => {
     const map = new Map<string, number>();
@@ -1043,11 +1145,15 @@ function DashboardScreen({
   }
 
   function exportSummaryExcel() {
-    const summaryRows = riskByAccount.map((row) => ({
+    const summaryRows = filteredRiskAccounts.map((row) => ({
       Conta: row.account,
+      Categoria: row.category,
       Tipo: row.typeLabel,
       SaldoInicial: row.balanceStart,
+      LiquidationThresholdBase: row.liquidationThresholdBase,
       SaldoAtual: row.balanceCurrent,
+      LiquidationThresholdAtual: row.liquidationThresholdCurrent,
+      DrawdownDiario: row.dailyDrawdown,
       Positivos: row.positive,
       Negativos: row.negative,
       Liquido: row.net,
@@ -1094,12 +1200,16 @@ function DashboardScreen({
     localStorage.removeItem(STORAGE_KEYS.selectedFile);
     localStorage.removeItem(STORAGE_KEYS.startDate);
     localStorage.removeItem(STORAGE_KEYS.endDate);
+    localStorage.removeItem(STORAGE_KEYS.accountCategory);
+    localStorage.removeItem(STORAGE_KEYS.accountStatus);
 
     setSelectedAccount("Todas");
     setSearch("");
     setSelectedFile("Todos");
     setStartDate("");
     setEndDate("");
+    setAccountCategory("Todas");
+    setAccountStatus("Todas");
   }
 
   return (
@@ -1164,6 +1274,26 @@ function DashboardScreen({
             ))}
           </select>
 
+          <select
+            value={accountCategory}
+            onChange={(e) => setAccountCategory(e.target.value)}
+            style={styles.select}
+          >
+            <option value="Todas">Todas as categorias</option>
+            <option value="Aprovadas">Contas aprovadas / PA</option>
+            <option value="Avaliação">Contas de avaliação</option>
+          </select>
+
+          <select
+            value={accountStatus}
+            onChange={(e) => setAccountStatus(e.target.value)}
+            style={styles.select}
+          >
+            <option value="Todas">Todos os status</option>
+            <option value="Ativas">Ativas</option>
+            <option value="Reprovadas">Reprovadas</option>
+          </select>
+
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -1197,11 +1327,11 @@ function DashboardScreen({
             Exportar risco e metas
           </button>
           <button style={styles.clearButton} onClick={clearLocalFilters}>
-            Limpar 
+            Limpar
           </button>
           <button style={styles.secondaryButton} onClick={onLogout}>
-          Sair
-        </button>
+            Sair
+          </button>
         </div>
       </aside>
 
@@ -1271,21 +1401,43 @@ function DashboardScreen({
               <MetricCard
                 title="Conta"
                 value={selectedRiskAccount.account}
-                subtitle={selectedRiskAccount.typeLabel}
+                subtitle={`${selectedRiskAccount.typeLabel} • ${selectedRiskAccount.category}`}
               />
               <MetricCard
                 title="Saldo atual"
                 value={formatCurrency(selectedRiskAccount.balanceCurrent)}
                 color={
-                  selectedRiskAccount.balanceCurrent >= 0 ? "#22c55e" : "#ef4444"
+                  selectedRiskAccount.balanceCurrent >= 0
+                    ? "#22c55e"
+                    : "#ef4444"
                 }
               />
               <MetricCard
-                title="Drawdown disponível"
-                value={formatCurrency(selectedRiskAccount.drawdownAvailable)}
+                title="Liquidation Threshold"
+                value={formatCurrency(
+                  selectedRiskAccount.liquidationThresholdCurrent
+                )}
+                subtitle={`Base: ${formatCurrency(
+                  selectedRiskAccount.liquidationThresholdBase
+                )}`}
                 color={
-                  selectedRiskAccount.status === "Crítico"
+                  selectedRiskAccount.status === "Reprovada"
                     ? "#ef4444"
+                    : selectedRiskAccount.status === "Crítica"
+                    ? "#fb923c"
+                    : selectedRiskAccount.status === "Atenção"
+                    ? "#f59e0b"
+                    : "#22c55e"
+                }
+              />
+              <MetricCard
+                title="Drawdown diário"
+                value={formatCurrency(selectedRiskAccount.dailyDrawdown)}
+                color={
+                  selectedRiskAccount.status === "Reprovada"
+                    ? "#ef4444"
+                    : selectedRiskAccount.status === "Crítica"
+                    ? "#fb923c"
                     : selectedRiskAccount.status === "Atenção"
                     ? "#f59e0b"
                     : "#22c55e"
@@ -1295,7 +1447,9 @@ function DashboardScreen({
                 title="Distância da meta"
                 value={formatCurrency(selectedRiskAccount.distanceToTarget)}
                 color={
-                  selectedRiskAccount.distanceToTarget <= 0 ? "#22c55e" : "#93c5fd"
+                  selectedRiskAccount.distanceToTarget <= 0
+                    ? "#22c55e"
+                    : "#93c5fd"
                 }
               />
               <MetricCard
@@ -1303,9 +1457,11 @@ function DashboardScreen({
                 value={formatCurrency(selectedRiskAccount.riskPerDay)}
                 subtitle={`Status: ${selectedRiskAccount.status}`}
                 color={
-                  selectedRiskAccount.status === "Falhou"
+                  selectedRiskAccount.status === "Reprovada"
                     ? "#ef4444"
-                    : selectedRiskAccount.status === "Crítico"
+                    : selectedRiskAccount.status === "Crítica"
+                    ? "#fb923c"
+                    : selectedRiskAccount.status === "Atenção"
                     ? "#f59e0b"
                     : "#22c55e"
                 }
@@ -1426,17 +1582,21 @@ function DashboardScreen({
                 <thead>
                   <tr>
                     <th style={styles.th}>Conta</th>
+                    <th style={styles.th}>Categoria</th>
                     <th style={styles.th}>Tipo</th>
                     <th style={styles.th}>Líquido</th>
-                    <th style={styles.th}>Drawdown disp.</th>
+                    <th style={styles.th}>Balance</th>
+                    <th style={styles.th}>Liquidation Threshold</th>
+                    <th style={styles.th}>Drawdown diário</th>
                     <th style={styles.th}>Meta</th>
                     <th style={styles.th}>Status</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {riskByAccount.map((row) => (
+                  {filteredRiskAccounts.map((row) => (
                     <tr key={row.account}>
                       <td style={styles.td}>{row.account}</td>
+                      <td style={styles.td}>{row.category}</td>
                       <td style={styles.td}>{row.typeLabel}</td>
                       <td
                         style={{
@@ -1447,7 +1607,13 @@ function DashboardScreen({
                         {formatCurrency(row.net)}
                       </td>
                       <td style={styles.td}>
-                        {formatCurrency(row.drawdownAvailable)}
+                        {formatCurrency(row.balanceCurrent)}
+                      </td>
+                      <td style={styles.td}>
+                        {formatCurrency(row.liquidationThresholdCurrent)}
+                      </td>
+                      <td style={styles.td}>
+                        {formatCurrency(row.dailyDrawdown)}
                       </td>
                       <td style={styles.td}>
                         {formatCurrency(row.distanceToTarget)}
@@ -1456,10 +1622,12 @@ function DashboardScreen({
                         style={{
                           ...styles.td,
                           color:
-                            row.status === "Saudável"
+                            row.status === "Ativa"
                               ? "#22c55e"
                               : row.status === "Atenção"
                               ? "#f59e0b"
+                              : row.status === "Crítica"
+                              ? "#fb923c"
                               : "#ef4444",
                         }}
                       >
@@ -1616,6 +1784,7 @@ function DashboardScreen({
     </div>
   );
 }
+
 
 export default function QiBoard() {
   const [user, setUser] = useState<UserData | null>(null);
