@@ -19,7 +19,6 @@ import {
   signInWithPopup,
   signOut,
   signInWithEmailAndPassword,
-  sendPasswordResetEmail,
   type User,
 } from "firebase/auth";
 import {
@@ -84,6 +83,8 @@ type AccountConfig = {
   trailingDrawdown: number;
   profitTarget: number;
   typeLabel: string;
+  fixedLiquidationThreshold?: number;
+  payoutResetBalance?: number;
 };
 
 const COLORS = ["#22c55e", "#ef4444"];
@@ -131,6 +132,8 @@ const PA_ACCOUNT_CONFIGS: Record<string, AccountConfig> = {
     trailingDrawdown: 1500,
     profitTarget: 0,
     typeLabel: "PA 25k",
+    fixedLiquidationThreshold: 25100,
+    payoutResetBalance: 26600,
   },
   // Adicione aqui outras PAs quando quiser que o resumo calcule
   // balance, liquidation threshold e drawdown com base no tamanho correto.
@@ -142,6 +145,98 @@ const PA_ACCOUNT_CONFIGS: Record<string, AccountConfig> = {
   //   typeLabel: "PA 50k",
   // },
 };
+
+
+
+function getTradeDateOnly(trade: Trade): Date | null {
+  if (trade.createdOn) {
+    const d = new Date(trade.createdOn);
+    if (!Number.isNaN(d.getTime())) {
+      return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    }
+  }
+
+  if (trade.movTime) {
+    const d = new Date(trade.movTime);
+    if (!Number.isNaN(d.getTime())) {
+      return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    }
+  }
+
+  if (trade.day) {
+    const [dd, mm, yyyy] = trade.day.split("/");
+    if (dd && mm && yyyy) {
+      const d = new Date(Number(yyyy), Number(mm) - 1, Number(dd));
+      if (!Number.isNaN(d.getTime())) {
+        return d;
+      }
+    }
+  }
+
+  return null;
+}
+
+function getDateKey(date: Date): string {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+const PA_DAILY_BALANCE_OVERRIDES: Record<string, Record<string, number>> = {
+  "PA-APEX-244134-47": {
+    "2026-03-17": 26900.62,
+    "2026-03-18": 27127.20,
+    "2026-03-19": 27241.60,
+    "2026-03-20": 27558.90,
+    "2026-03-23": 27771.86,
+    "2026-03-24": 27947.56,
+    "2026-03-25": 28187.74,
+    "2026-03-26": 28262.92,
+    "2026-03-27": 28452.52,
+    "2026-03-30": 28707.58,
+    "2026-04-01": 27207.58,
+    "2026-04-02": 27446.38,
+    "2026-04-03": 27617.40,
+    "2026-04-06": 27782.08,
+    "2026-04-07": 27951.32,
+    "2026-04-08": 28156.44,
+    "2026-04-09": 28186.90,
+    "2026-04-10": 28131.86,
+    "2026-04-13": 28110.82,
+    "2026-04-15": 26610.82,
+    "2026-04-16": 26782.92,
+    "2026-04-17": 26938.42,
+    "2026-04-20": 27022.18,
+    "2026-04-21": 27216.18,
+    "2026-04-22": 27407.48,
+  },
+};
+
+function getPADailyBalanceOverride(
+  account: string,
+  referenceDate: Date | null
+): number | null {
+  const balances = PA_DAILY_BALANCE_OVERRIDES[account];
+  if (!balances) return null;
+
+  const referenceKey = referenceDate ? getDateKey(referenceDate) : null;
+  const ordered = Object.entries(balances).sort((a, b) =>
+    a[0].localeCompare(b[0])
+  );
+
+  let current: number | null = null;
+
+  for (const [dateKey, balance] of ordered) {
+    if (!referenceKey || dateKey <= referenceKey) {
+      current = balance;
+    } else {
+      break;
+    }
+  }
+
+  return current;
+}
 
 function detectAccountConfig(account: string): AccountConfig {
   if (account.startsWith("PA-")) {
@@ -337,52 +432,6 @@ function MetricCard({
   );
 }
 
-type AppMessageState = {
-  type: "success" | "error" | "info";
-  title: string;
-  message: string;
-};
-
-function AppMessageModal({
-  popup,
-  onClose,
-}: {
-  popup: AppMessageState | null;
-  onClose: () => void;
-}) {
-  if (!popup) return null;
-
-  const tone =
-    popup.type === "success"
-      ? { background: "rgba(34,197,94,0.15)", color: "#22c55e", label: "Sucesso" }
-      : popup.type === "error"
-      ? { background: "rgba(239,68,68,0.15)", color: "#f87171", label: "Atenção" }
-      : { background: "rgba(59,130,246,0.15)", color: "#60a5fa", label: "Informação" };
-
-  return (
-    <div style={styles.modalOverlay}>
-      <div style={styles.messageCard}>
-        <div
-          style={{
-            ...styles.messageBadge,
-            background: tone.background,
-            color: tone.color,
-          }}
-        >
-          {tone.label}
-        </div>
-        <div style={styles.modalTitle}>{popup.title}</div>
-        <div style={styles.modalText}>{popup.message}</div>
-        <div style={styles.messageButtonRow}>
-          <button style={styles.modalPrimaryButton} onClick={onClose}>
-            OK
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function LoginScreen({
   onGoogleLogin,
   onEmailLogin,
@@ -400,224 +449,74 @@ function LoginScreen({
   passwordLogin: string;
   setPasswordLogin: React.Dispatch<React.SetStateAction<string>>;
 }) {
-  const [showResetPopup, setShowResetPopup] = useState(false);
-  const [resetEmail, setResetEmail] = useState("");
-  const [resetLoading, setResetLoading] = useState(false);
-  const [messagePopup, setMessagePopup] = useState<{
-    type: "success" | "error";
-    title: string;
-    message: string;
-  } | null>(null);
-
-  function closeMessagePopup() {
-    setMessagePopup(null);
-  }
-
-  function normalizeFirebaseMessage(error: any) {
-    const code = error?.code || "";
-
-    switch (code) {
-      case "auth/user-not-found":
-        return "Não encontramos uma conta com esse email.";
-      case "auth/invalid-email":
-        return "Digite um email válido.";
-      case "auth/missing-email":
-        return "Informe o email para receber o link.";
-      case "auth/too-many-requests":
-        return "Muitas tentativas. Aguarde alguns minutos e tente novamente.";
-      default:
-        return error?.message || "Não foi possível enviar o link de redefinição.";
-    }
-  }
-
-  async function handleForgotPassword() {
-    if (!resetEmail.trim()) {
-      setMessagePopup({
-        type: "error",
-        title: "Email obrigatório",
-        message: "Digite o email para receber o link de redefinição.",
-      });
-      return;
-    }
-
-    try {
-      setResetLoading(true);
-      await sendPasswordResetEmail(auth, resetEmail.trim());
-      setShowResetPopup(false);
-      setMessagePopup({
-        type: "success",
-        title: "Link enviado",
-        message:
-          "Enviamos um link para redefinir sua senha. Depois de salvar a nova senha, volte para a tela de login e teste o acesso.",
-      });
-      setResetEmail("");
-    } catch (error: any) {
-      console.error("Erro ao enviar redefinição de senha:", error);
-      setMessagePopup({
-        type: "error",
-        title: "Não foi possível enviar",
-        message: normalizeFirebaseMessage(error),
-      });
-    } finally {
-      setResetLoading(false);
-    }
-  }
-
   return (
-    <>
-      <div style={styles.loginWrap}>
-        <div style={styles.loginPanel}>
-          <div style={styles.brandBadge}>QiBoard</div>
-          <h1 style={styles.loginTitle}>
-            Painel profissional para contas mesas proprietárias
-          </h1>
-          <p style={styles.loginText}>
-            Faça login com sua conta Google ou com email e senha para acessar o
-            dashboard.
-          </p>
+    <div style={styles.loginWrap}>
+      <div style={styles.loginPanel}>
+        <div style={styles.brandBadge}>QiBoard</div>
+        <h1 style={styles.loginTitle}>
+          Painel profissional para contas mesas proprietárias
+        </h1>
+        <p style={styles.loginText}>
+          Faça login com sua conta Google ou com email e senha para acessar o
+          dashboard.
+        </p>
 
-          <input
-            type="email"
-            placeholder="Digite seu email"
-            value={emailLogin}
-            onChange={(e) => setEmailLogin(e.target.value)}
-            style={styles.loginInput}
-          />
+        <input
+          type="email"
+          placeholder="Digite seu email"
+          value={emailLogin}
+          onChange={(e) => setEmailLogin(e.target.value)}
+          style={styles.loginInput}
+        />
 
-          <input
-            type="password"
-            placeholder="Digite sua senha"
-            value={passwordLogin}
-            onChange={(e) => setPasswordLogin(e.target.value)}
-            style={styles.loginInput}
-          />
+        <input
+          type="password"
+          placeholder="Digite sua senha"
+          value={passwordLogin}
+          onChange={(e) => setPasswordLogin(e.target.value)}
+          style={styles.loginInput}
+        />
 
-          <div style={styles.loginLinkRow}>
-            <button
-              type="button"
-              style={styles.inlineLinkButton}
-              onClick={() => {
-                setResetEmail(emailLogin);
-                setShowResetPopup(true);
-              }}
-            >
-              Esqueci a senha
-            </button>
-          </div>
+        <button
+          style={styles.googleButton}
+          onClick={onEmailLogin}
+          disabled={loading}
+        >
+          {loading ? "Entrando..." : "Entrar com email"}
+        </button>
 
-          <button
-            style={styles.googleButton}
-            onClick={onEmailLogin}
-            disabled={loading}
-          >
-            {loading ? "Entrando..." : "Entrar com email"}
-          </button>
+        <button
+  style={styles.googleLoginButton}
+  onClick={onGoogleLogin}
+  disabled={loading}
+>
+  <span style={styles.googleIconWrap}>
+    <svg width="18" height="18" viewBox="0 0 48 48">
+      <path
+        fill="#FFC107"
+        d="M43.611 20.083H42V20H24v8h11.303C33.655 32.657 29.195 36 24 36c-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.96 3.04l5.657-5.657C34.046 6.053 29.277 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z"
+      />
+      <path
+        fill="#FF3D00"
+        d="M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.96 3.04l5.657-5.657C34.046 6.053 29.277 4 24 4 16.318 4 9.656 8.337 6.306 14.691z"
+      />
+      <path
+        fill="#4CAF50"
+        d="M24 44c5.176 0 9.86-1.977 13.409-5.192l-6.19-5.238C29.143 35.091 26.715 36 24 36c-5.174 0-9.623-3.326-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z"
+      />
+      <path
+        fill="#1976D2"
+        d="M43.611 20.083H42V20H24v8h11.303c-.792 2.237-2.231 4.166-4.084 5.571l.003-.002 6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z"
+      />
+    </svg>
+  </span>
 
-          <button
-            style={styles.googleLoginButton}
-            onClick={onGoogleLogin}
-            disabled={loading}
-          >
-            <span style={styles.googleIconWrap}>
-              <svg width="18" height="18" viewBox="0 0 48 48">
-                <path
-                  fill="#FFC107"
-                  d="M43.611 20.083H42V20H24v8h11.303C33.655 32.657 29.195 36 24 36c-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.96 3.04l5.657-5.657C34.046 6.053 29.277 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z"
-                />
-                <path
-                  fill="#FF3D00"
-                  d="M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.96 3.04l5.657-5.657C34.046 6.053 29.277 4 24 4 16.318 4 9.656 8.337 6.306 14.691z"
-                />
-                <path
-                  fill="#4CAF50"
-                  d="M24 44c5.176 0 9.86-1.977 13.409-5.192l-6.19-5.238C29.143 35.091 26.715 36 24 36c-5.174 0-9.623-3.326-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z"
-                />
-                <path
-                  fill="#1976D2"
-                  d="M43.611 20.083H42V20H24v8h11.303c-.792 2.237-2.231 4.166-4.084 5.571l.003-.002 6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z"
-                />
-              </svg>
-            </span>
-
-            <span>{loading ? "Entrando..." : "Entrar com Google"}</span>
-          </button>
-        </div>
+  <span>{loading ? "Entrando..." : "Entrar com Google"}</span>
+</button>
       </div>
-
-      {showResetPopup ? (
-        <div style={styles.modalOverlay}>
-          <div style={styles.modalCard}>
-            <div style={styles.modalHeaderRow}>
-              <div>
-                <div style={styles.modalTitle}>Esqueci a senha</div>
-                <div style={styles.modalText}>
-                  Digite seu email para receber o link de redefinição.
-                </div>
-              </div>
-            </div>
-
-            <input
-              type="email"
-              placeholder="Digite seu email"
-              value={resetEmail}
-              onChange={(e) => setResetEmail(e.target.value)}
-              style={styles.loginInput}
-            />
-
-            <div style={styles.modalButtonsRow}>
-              <button
-                style={styles.modalGhostButton}
-                onClick={() => {
-                  if (!resetLoading) {
-                    setShowResetPopup(false);
-                  }
-                }}
-                disabled={resetLoading}
-              >
-                Cancelar
-              </button>
-              <button
-                style={styles.modalPrimaryButton}
-                onClick={handleForgotPassword}
-                disabled={resetLoading}
-              >
-                {resetLoading ? "Enviando..." : "Enviar link"}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {messagePopup ? (
-        <div style={styles.modalOverlay}>
-          <div style={styles.messageCard}>
-            <div
-              style={{
-                ...styles.messageBadge,
-                background:
-                  messagePopup.type === "success"
-                    ? "rgba(34,197,94,0.15)"
-                    : "rgba(239,68,68,0.15)",
-                color:
-                  messagePopup.type === "success" ? "#22c55e" : "#f87171",
-              }}
-            >
-              {messagePopup.type === "success" ? "Sucesso" : "Atenção"}
-            </div>
-            <div style={styles.modalTitle}>{messagePopup.title}</div>
-            <div style={styles.modalText}>{messagePopup.message}</div>
-            <div style={styles.messageButtonRow}>
-              <button style={styles.modalPrimaryButton} onClick={closeMessagePopup}>
-                OK
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-    </>
+    </div>
   );
 }
-
 
 function DashboardScreen({
   onLogout,
@@ -637,15 +536,6 @@ function DashboardScreen({
   const [lastImportedFileName, setLastImportedFileName] = useState("");
   const [screenWidth, setScreenWidth] = useState(window.innerWidth);
   const [loadingData, setLoadingData] = useState(false);
-  const [messagePopup, setMessagePopup] = useState<AppMessageState | null>(null);
-
-  function showMessage(
-    title: string,
-    message: string,
-    type: AppMessageState["type"] = "info"
-  ) {
-    setMessagePopup({ title, message, type });
-  }
 
   useEffect(() => {
     function handleResize() {
@@ -754,16 +644,14 @@ function DashboardScreen({
         insertedCount += 1;
       }
 
-      showMessage(
-        insertedCount > 0 ? "Importação concluída" : "Nenhum trade novo salvo",
+      alert(
         insertedCount > 0
           ? `${insertedCount} trade(s) novo(s) salvo(s) no banco.`
-          : "Nenhum trade novo foi salvo. Os orderId já existem no banco.",
-        insertedCount > 0 ? "success" : "info"
+          : "Nenhum trade novo foi salvo. Os orderId já existem no banco."
       );
     } catch (error) {
       console.error("Erro ao salvar trades no Firestore:", error);
-      showMessage("Erro ao salvar", "Erro ao salvar trades no banco.", "error");
+      alert("Erro ao salvar trades no banco.");
     }
   }
 
@@ -814,7 +702,7 @@ function DashboardScreen({
       }
     } catch (error) {
       console.error("Erro ao carregar trades do Firestore:", error);
-      showMessage("Erro ao carregar", "Erro ao recarregar dados do banco.", "error");
+      alert("Erro ao recarregar dados do banco.");
     } finally {
       setLoadingData(false);
     }
@@ -916,6 +804,38 @@ function DashboardScreen({
     endDate,
   ]);
 
+  const riskReferenceDate = useMemo(() => {
+    const value = endDate || startDate;
+    return value ? new Date(`${value}T00:00:00`) : null;
+  }, [startDate, endDate]);
+
+  const cumulativeNetByAccount = useMemo(() => {
+    const map = new Map<string, number>();
+
+    trades.forEach((trade) => {
+      const accountOk =
+        selectedAccount === "Todas" || trade.account === selectedAccount;
+
+      const categoryOk =
+        accountCategory === "Todas" ||
+        (accountCategory === "Aprovadas" && isPAAccount(trade.account)) ||
+        (accountCategory === "Avaliação" && !isPAAccount(trade.account));
+
+      if (!accountOk || !categoryOk) return;
+
+      if (riskReferenceDate) {
+        const tradeDate = getTradeDateOnly(trade);
+        if (!tradeDate || tradeDate.getTime() > riskReferenceDate.getTime()) {
+          return;
+        }
+      }
+
+      map.set(trade.account, (map.get(trade.account) || 0) + trade.profit);
+    });
+
+    return map;
+  }, [trades, selectedAccount, accountCategory, riskReferenceDate]);
+
   const metrics = useMemo(() => {
     const positive = filteredTrades.filter((t) => t.profit > 0);
     const negative = filteredTrades.filter((t) => t.profit < 0);
@@ -980,30 +900,45 @@ function DashboardScreen({
   const riskByAccount = useMemo(() => {
     return byAccount.map((row) => {
       const cfg = detectAccountConfig(row.account);
-      const liquidationThresholdBase =
-        cfg.balanceStart > 0 ? cfg.balanceStart - cfg.trailingDrawdown : 0;
+      const isPA = isPAAccount(row.account);
+      const cumulativeNet = cumulativeNetByAccount.get(row.account) || 0;
 
-      const balanceCurrent =
-        cfg.balanceStart > 0 ? cfg.balanceStart + row.net : row.net;
+      let liquidationThresholdBase =
+        cfg.fixedLiquidationThreshold ??
+        (cfg.balanceStart > 0 ? cfg.balanceStart - cfg.trailingDrawdown : 0);
 
-      const liquidationThresholdCurrent =
-        cfg.balanceStart > 0
-          ? liquidationThresholdBase + row.net
-          : liquidationThresholdBase;
+      let balanceCurrent =
+        cfg.balanceStart > 0 ? cfg.balanceStart + cumulativeNet : cumulativeNet;
 
-      const dailyDrawdown =
-        cfg.balanceStart > 0
-          ? balanceCurrent - liquidationThresholdCurrent
-          : cfg.trailingDrawdown;
+      let liquidationThresholdCurrent =
+        cfg.fixedLiquidationThreshold ??
+        (cfg.balanceStart > 0
+          ? liquidationThresholdBase + cumulativeNet
+          : liquidationThresholdBase);
 
+      if (isPA) {
+        const overrideBalance = getPADailyBalanceOverride(
+          row.account,
+          riskReferenceDate
+        );
+
+        if (overrideBalance !== null) {
+          balanceCurrent = overrideBalance;
+        }
+
+        liquidationThresholdCurrent =
+          cfg.fixedLiquidationThreshold ?? liquidationThresholdBase;
+      }
+
+      const dailyDrawdown = balanceCurrent - liquidationThresholdCurrent;
       const drawdownAvailable = dailyDrawdown;
 
       const distanceToTarget =
-        cfg.profitTarget > 0 ? cfg.profitTarget - row.net : 0;
+        cfg.profitTarget > 0 ? cfg.profitTarget - cumulativeNet : 0;
 
       const progressToTarget =
         cfg.profitTarget > 0
-          ? Math.max(0, Math.min(100, (row.net / cfg.profitTarget) * 100))
+          ? Math.max(0, Math.min(100, (cumulativeNet / cfg.profitTarget) * 100))
           : 0;
 
       const riskPerDay =
@@ -1011,7 +946,7 @@ function DashboardScreen({
 
       let status = "Ativa";
 
-      if (cfg.balanceStart > 0) {
+      if (!isPA && cfg.balanceStart > 0) {
         if (dailyDrawdown <= 0) {
           status = "Reprovada";
         } else if (dailyDrawdown < cfg.trailingDrawdown * 0.2) {
@@ -1026,7 +961,7 @@ function DashboardScreen({
       return {
         account: row.account,
         category: getAccountCategoryLabel(row.account),
-        isPA: isPAAccount(row.account),
+        isPA,
         typeLabel: cfg.typeLabel,
         balanceStart: cfg.balanceStart,
         liquidationThresholdBase,
@@ -1041,12 +976,13 @@ function DashboardScreen({
         riskPerDay,
         status,
         net: row.net,
+        cumulativeNet,
         positive: row.positive,
         negative: row.negative,
         trades: row.trades,
       };
     });
-  }, [byAccount]);
+  }, [byAccount, cumulativeNetByAccount, riskReferenceDate]);
 
   const filteredRiskAccounts = useMemo(() => {
     return riskByAccount.filter((row) => {
@@ -1349,7 +1285,7 @@ function DashboardScreen({
       return;
     }
 
-    showMessage("Formato não suportado", "Use .csv, .xlsx ou .xls", "error");
+    alert("Formato não suportado. Use .csv, .xlsx ou .xls");
   }
 
   function exportSummaryExcel() {
@@ -1421,8 +1357,7 @@ function DashboardScreen({
   }
 
   return (
-    <>
-      <div style={layout.appShell}>
+    <div style={layout.appShell}>
       <aside style={layout.sidebar}>
         <div>
           <div style={styles.logo}>QiBoard</div>
@@ -1991,11 +1926,6 @@ function DashboardScreen({
         </div>
       </main>
     </div>
-      <AppMessageModal
-        popup={messagePopup}
-        onClose={() => setMessagePopup(null)}
-      />
-    </>
   );
 }
 
@@ -2006,15 +1936,6 @@ export default function QiBoard() {
   const [loginLoading, setLoginLoading] = useState(false);
   const [emailLogin, setEmailLogin] = useState("");
   const [passwordLogin, setPasswordLogin] = useState("");
-  const [messagePopup, setMessagePopup] = useState<AppMessageState | null>(null);
-
-  function showMessage(
-    title: string,
-    message: string,
-    type: AppMessageState["type"] = "info"
-  ) {
-    setMessagePopup({ title, message, type });
-  }
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
@@ -2025,7 +1946,7 @@ export default function QiBoard() {
           if (!appUser.active) {
             setUser(null);
             await signOut(auth);
-            showMessage("Acesso inativo", "Seu acesso ainda não está ativo.", "error");
+            alert("Seu acesso ainda não está ativo.");
           } else {
             setUser(mapFirebaseUser(firebaseUser));
           }
@@ -2053,17 +1974,15 @@ export default function QiBoard() {
       const appUser = await ensureAppUser(firebaseUser);
 
       if (!appUser.active) {
-        showMessage(
-          "Acesso inativo",
-          `O usuário ${firebaseUser.email} foi cadastrado, mas ainda está inativo.`,
-          "error"
+        alert(
+          `O usuário ${firebaseUser.email} foi cadastrado, mas ainda está inativo.`
         );
         await signOut(auth);
         return;
       }
     } catch (error) {
       console.error("Erro ao fazer login com Google:", error);
-      showMessage("Falha no login", "Não foi possível entrar com Google.", "error");
+      alert("Não foi possível entrar com Google.");
     } finally {
       setLoginLoading(false);
     }
@@ -2083,17 +2002,15 @@ export default function QiBoard() {
       const appUser = await ensureAppUser(firebaseUser);
 
       if (!appUser.active) {
-        showMessage(
-          "Acesso inativo",
-          `O usuário ${firebaseUser.email} está cadastrado, mas ainda está inativo.`,
-          "error"
+        alert(
+          `O usuário ${firebaseUser.email} está cadastrado, mas ainda está inativo.`
         );
         await signOut(auth);
         return;
       }
     } catch (error) {
       console.error("Erro ao fazer login com email e senha:", error);
-      showMessage("Falha no login", "Não foi possível entrar com email e senha.", "error");
+      alert("Não foi possível entrar com email e senha.");
     } finally {
       setLoginLoading(false);
     }
@@ -2105,47 +2022,27 @@ export default function QiBoard() {
 
   if (authLoading) {
     return (
-      <>
-        <div style={styles.loadingScreen}>
-          <div style={styles.loadingText}>Carregando sessão...</div>
-        </div>
-        <AppMessageModal
-          popup={messagePopup}
-          onClose={() => setMessagePopup(null)}
-        />
-      </>
+      <div style={styles.loadingScreen}>
+        <div style={styles.loadingText}>Carregando sessão...</div>
+      </div>
     );
   }
 
   if (!user) {
     return (
-      <>
-        <LoginScreen
-          onGoogleLogin={handleGoogleLogin}
-          onEmailLogin={handleEmailLogin}
-          loading={loginLoading}
-          emailLogin={emailLogin}
-          setEmailLogin={setEmailLogin}
-          passwordLogin={passwordLogin}
-          setPasswordLogin={setPasswordLogin}
-        />
-        <AppMessageModal
-          popup={messagePopup}
-          onClose={() => setMessagePopup(null)}
-        />
-      </>
+      <LoginScreen
+        onGoogleLogin={handleGoogleLogin}
+        onEmailLogin={handleEmailLogin}
+        loading={loginLoading}
+        emailLogin={emailLogin}
+        setEmailLogin={setEmailLogin}
+        passwordLogin={passwordLogin}
+        setPasswordLogin={setPasswordLogin}
+      />
     );
   }
 
-  return (
-    <>
-      <DashboardScreen onLogout={handleLogout} user={user} />
-      <AppMessageModal
-        popup={messagePopup}
-        onClose={() => setMessagePopup(null)}
-      />
-    </>
-  );
+  return <DashboardScreen onLogout={handleLogout} user={user} />;
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -2491,107 +2388,6 @@ const styles: Record<string, React.CSSProperties> = {
   },
   loadingText: {
     fontSize: 24,
-    fontWeight: 700,
-  },
-  loginLinkRow: {
-    display: "flex",
-    justifyContent: "flex-end",
-    marginTop: -4,
-    marginBottom: 4,
-  },
-  inlineLinkButton: {
-    background: "transparent",
-    border: "none",
-    color: "#93c5fd",
-    cursor: "pointer",
-    fontSize: 13,
-    padding: 0,
-    textDecoration: "underline",
-  },
-  modalOverlay: {
-    position: "fixed",
-    inset: 0,
-    background: "rgba(2, 6, 23, 0.76)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    zIndex: 9999,
-    padding: 16,
-  },
-  modalCard: {
-    width: "100%",
-    maxWidth: 440,
-    background: "linear-gradient(180deg, #111c2e 0%, #0f172a 100%)",
-    border: "1px solid #223048",
-    borderRadius: 20,
-    boxShadow: "0 20px 60px rgba(0,0,0,0.45)",
-    padding: 24,
-    display: "flex",
-    flexDirection: "column",
-    gap: 16,
-  },
-  messageCard: {
-    width: "100%",
-    maxWidth: 420,
-    background: "linear-gradient(180deg, #111c2e 0%, #0f172a 100%)",
-    border: "1px solid #223048",
-    borderRadius: 20,
-    boxShadow: "0 20px 60px rgba(0,0,0,0.45)",
-    padding: 24,
-    display: "flex",
-    flexDirection: "column",
-    gap: 12,
-  },
-  modalHeaderRow: {
-    display: "flex",
-    alignItems: "flex-start",
-    justifyContent: "space-between",
-    gap: 12,
-  },
-  modalTitle: {
-    color: "#f8fafc",
-    fontSize: 22,
-    fontWeight: 700,
-  },
-  modalText: {
-    color: "#94a3b8",
-    fontSize: 14,
-    lineHeight: 1.5,
-    marginTop: 6,
-  },
-  modalButtonsRow: {
-    display: "flex",
-    justifyContent: "flex-end",
-    gap: 10,
-  },
-  messageButtonRow: {
-    display: "flex",
-    justifyContent: "flex-end",
-    marginTop: 4,
-  },
-  modalGhostButton: {
-    padding: "12px 16px",
-    borderRadius: 12,
-    border: "1px solid #334155",
-    background: "transparent",
-    color: "#e2e8f0",
-    fontWeight: 700,
-    cursor: "pointer",
-  },
-  modalPrimaryButton: {
-    padding: "12px 16px",
-    borderRadius: 12,
-    border: "none",
-    background: "#2563eb",
-    color: "#ffffff",
-    fontWeight: 700,
-    cursor: "pointer",
-  },
-  messageBadge: {
-    alignSelf: "flex-start",
-    padding: "6px 10px",
-    borderRadius: 999,
-    fontSize: 12,
     fontWeight: 700,
   },
   googleLoginButton: {
