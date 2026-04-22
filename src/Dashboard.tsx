@@ -19,6 +19,7 @@ import {
   signInWithPopup,
   signOut,
   signInWithEmailAndPassword,
+  sendPasswordResetEmail,
   type User,
 } from "firebase/auth";
 import {
@@ -435,6 +436,7 @@ function MetricCard({
 function LoginScreen({
   onGoogleLogin,
   onEmailLogin,
+  onForgotPassword,
   loading,
   emailLogin,
   setEmailLogin,
@@ -443,6 +445,7 @@ function LoginScreen({
 }: {
   onGoogleLogin: () => void;
   onEmailLogin: () => void;
+  onForgotPassword: () => void;
   loading: boolean;
   emailLogin: string;
   setEmailLogin: React.Dispatch<React.SetStateAction<string>>;
@@ -476,6 +479,15 @@ function LoginScreen({
           onChange={(e) => setPasswordLogin(e.target.value)}
           style={styles.loginInput}
         />
+
+        <div style={{ textAlign: "right", marginTop: -2, marginBottom: 12 }}>
+          <span
+            style={styles.loginLink}
+            onClick={onForgotPassword}
+          >
+            Esqueci a senha
+          </span>
+        </div>
 
         <button
           style={styles.googleButton}
@@ -1936,6 +1948,46 @@ export default function QiBoard() {
   const [loginLoading, setLoginLoading] = useState(false);
   const [emailLogin, setEmailLogin] = useState("");
   const [passwordLogin, setPasswordLogin] = useState("");
+  const [showResetPopup, setShowResetPopup] = useState(false);
+  const [resetEmail, setResetEmail] = useState("");
+  const [resetLoading, setResetLoading] = useState(false);
+  const [message, setMessage] = useState<{
+    text: string;
+    type: "success" | "error" | "info";
+  } | null>(null);
+
+  function showMessage(
+    text: string,
+    type: "success" | "error" | "info" = "info"
+  ) {
+    setMessage({ text, type });
+  }
+
+  async function handleResetPassword() {
+    if (!resetEmail.trim()) {
+      showMessage("Informe um email válido.", "error");
+      return;
+    }
+
+    try {
+      setResetLoading(true);
+      await sendPasswordResetEmail(auth, resetEmail.trim());
+      showMessage(
+        "Se o email existir, enviamos um link para redefinição de senha.",
+        "success"
+      );
+      setShowResetPopup(false);
+      setResetEmail("");
+    } catch (error: any) {
+      console.error("Erro ao enviar redefinição de senha:", error);
+      showMessage(
+        error?.message || "Não foi possível enviar o link de redefinição.",
+        "error"
+      );
+    } finally {
+      setResetLoading(false);
+    }
+  }
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
@@ -1946,7 +1998,7 @@ export default function QiBoard() {
           if (!appUser.active) {
             setUser(null);
             await signOut(auth);
-            alert("Seu acesso ainda não está ativo.");
+            showMessage("Seu acesso ainda não está ativo.", "error");
           } else {
             setUser(mapFirebaseUser(firebaseUser));
           }
@@ -1974,15 +2026,16 @@ export default function QiBoard() {
       const appUser = await ensureAppUser(firebaseUser);
 
       if (!appUser.active) {
-        alert(
-          `O usuário ${firebaseUser.email} foi cadastrado, mas ainda está inativo.`
+        showMessage(
+          `O usuário ${firebaseUser.email} foi cadastrado, mas ainda está inativo.`,
+          "error"
         );
         await signOut(auth);
         return;
       }
     } catch (error) {
       console.error("Erro ao fazer login com Google:", error);
-      alert("Não foi possível entrar com Google.");
+      showMessage("Não foi possível entrar com Google.", "error");
     } finally {
       setLoginLoading(false);
     }
@@ -2002,15 +2055,16 @@ export default function QiBoard() {
       const appUser = await ensureAppUser(firebaseUser);
 
       if (!appUser.active) {
-        alert(
-          `O usuário ${firebaseUser.email} está cadastrado, mas ainda está inativo.`
+        showMessage(
+          `O usuário ${firebaseUser.email} está cadastrado, mas ainda está inativo.`,
+          "error"
         );
         await signOut(auth);
         return;
       }
     } catch (error) {
       console.error("Erro ao fazer login com email e senha:", error);
-      alert("Não foi possível entrar com email e senha.");
+      showMessage("Não foi possível entrar com email e senha.", "error");
     } finally {
       setLoginLoading(false);
     }
@@ -2030,15 +2084,86 @@ export default function QiBoard() {
 
   if (!user) {
     return (
-      <LoginScreen
-        onGoogleLogin={handleGoogleLogin}
-        onEmailLogin={handleEmailLogin}
-        loading={loginLoading}
-        emailLogin={emailLogin}
-        setEmailLogin={setEmailLogin}
-        passwordLogin={passwordLogin}
-        setPasswordLogin={setPasswordLogin}
-      />
+      <>
+        <LoginScreen
+          onGoogleLogin={handleGoogleLogin}
+          onEmailLogin={handleEmailLogin}
+          onForgotPassword={() => {
+            setResetEmail(emailLogin || "");
+            setShowResetPopup(true);
+          }}
+          loading={loginLoading}
+          emailLogin={emailLogin}
+          setEmailLogin={setEmailLogin}
+          passwordLogin={passwordLogin}
+          setPasswordLogin={setPasswordLogin}
+        />
+
+        {showResetPopup && (
+          <div style={styles.modalOverlay}>
+            <div style={styles.modalBox}>
+              <div style={styles.modalTitle}>Redefinir senha</div>
+              <p style={styles.modalText}>
+                Digite seu email para receber o link de redefinição de senha.
+              </p>
+
+              <input
+                type="email"
+                placeholder="Digite seu email"
+                value={resetEmail}
+                onChange={(e) => setResetEmail(e.target.value)}
+                style={styles.loginInput}
+              />
+
+              <div style={styles.modalActions}>
+                <button
+                  style={styles.secondaryButton}
+                  onClick={() => {
+                    setShowResetPopup(false);
+                    setResetEmail("");
+                  }}
+                  disabled={resetLoading}
+                >
+                  Cancelar
+                </button>
+
+                <button
+                  style={styles.actionButton}
+                  onClick={handleResetPassword}
+                  disabled={resetLoading}
+                >
+                  {resetLoading ? "Enviando..." : "Enviar link"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {message && (
+          <div style={styles.popupOverlay}>
+            <div
+              style={{
+                ...styles.popupBox,
+                borderColor:
+                  message.type === "success"
+                    ? "#22c55e"
+                    : message.type === "error"
+                    ? "#ef4444"
+                    : "#3b82f6",
+              }}
+            >
+              <div style={styles.popupText}>{message.text}</div>
+
+              <button
+                style={styles.actionButton}
+                onClick={() => setMessage(null)}
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        )}
+      </>
     );
   }
 
@@ -2413,4 +2538,74 @@ googleIconWrap: {
   width: 20,
   height: 20,
 },
+  modalOverlay: {
+    position: "fixed",
+    top: 0,
+    left: 0,
+    width: "100%",
+    height: "100%",
+    backgroundColor: "rgba(0,0,0,0.65)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 1000,
+    padding: 16,
+    boxSizing: "border-box",
+  },
+  modalBox: {
+    width: "100%",
+    maxWidth: 420,
+    background: "#0f172a",
+    border: "1px solid #223048",
+    borderRadius: 18,
+    padding: 24,
+    boxShadow: "0 20px 60px rgba(0,0,0,0.45)",
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 700,
+    color: "#f8fafc",
+    marginBottom: 8,
+  },
+  modalText: {
+    fontSize: 14,
+    color: "#94a3b8",
+    marginBottom: 16,
+    lineHeight: 1.5,
+  },
+  modalActions: {
+    display: "flex",
+    gap: 12,
+    marginTop: 8,
+  },
+  popupOverlay: {
+    position: "fixed",
+    top: 0,
+    left: 0,
+    width: "100%",
+    height: "100%",
+    backgroundColor: "rgba(0,0,0,0.55)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 1100,
+    padding: 16,
+    boxSizing: "border-box",
+  },
+  popupBox: {
+    width: "100%",
+    maxWidth: 420,
+    backgroundColor: "#0f172a",
+    padding: 24,
+    borderRadius: 18,
+    border: "1px solid #223048",
+    boxShadow: "0 20px 60px rgba(0,0,0,0.45)",
+    textAlign: "center",
+  },
+  popupText: {
+    color: "#e2e8f0",
+    marginBottom: 18,
+    fontSize: 15,
+    lineHeight: 1.5,
+  },
 };
